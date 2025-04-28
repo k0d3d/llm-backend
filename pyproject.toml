@@ -1,0 +1,25 @@
+[project]
+name = "llm-backend"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Pxlart Design",email = "michael.rhema@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai-slim (>=0.1.7,<0.2.0)",
+    "fastapi[standard] (>=0.115.12,<0.116.0)",
+    "replicate (>=1.0.6,<2.0.0)",
+    "requests (>=2.32.3,<3.0.0)",
+    "python-dotenv (>=1.1.0,<2.0.0)",
+    "sentry-sdk[fastapi] (>=2.27.0,<3.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "llm_backend", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
