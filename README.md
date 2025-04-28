@@ -20,7 +20,7 @@ my_dynamic_mas/
 ├── pyproject.toml         # Poetry project configuration
 ├── poetry.lock           # Poetry lock file
 ├── src/
-│   └── my_dynamic_mas/
+│   └── dynamic_mas/
 │       ├── __init__.py
 │       ├── core/             # Core system components
 │       │   ├── __init__.py

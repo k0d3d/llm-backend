@@ -1,9 +1,9 @@
 [project]
-name = "llm-backend"
+name = "tohju-llm-backend"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Pxlart Design",email = "michael.rhema@gmail.com"}
+    {name = "Tohju Dev",email = "michael@tohju.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,10 @@ dependencies = [
 ]
 
 [tool.poetry]
-packages = [{include = "llm_backend", from = "src"}]
+packages = [
+    {include = "llm_backend", from = "src"},
+    {include = "dynamic_mas", from = "src"}
+]
 
 
 [build-system]
