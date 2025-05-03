@@ -1,11 +1,10 @@
 # src/my_dynamic_mas/agents/ceo_agent.py
 
 from typing import Optional, List, Dict, Callable, Union
-from src.my_dynamic_mas.core.data_models.subtask import SubTask
-from src.my_dynamic_mas.core.data_models.flow_control import (
+from dynamic_mas.core.data_models.subtask import SubTask
+from dynamic_mas.core.data_models.flow_control import (
     ControlFlowStep,
     TaskStep,
-    Condition,
 )
 
 

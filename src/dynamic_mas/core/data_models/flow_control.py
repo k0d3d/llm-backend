@@ -4,17 +4,15 @@ from pydantic import BaseModel
 
 class Condition(BaseModel):
     name: str
-    function: Optional[Callable] = (
-        None  # Or a string reference to a function in the registry
-    )
+    function: Optional[str] = None  # String reference to function in registry
     args: Dict = {}
 
 
 class Action(BaseModel):
     name: str
-    function: Optional[Callable] = None  # Or a string reference
+    function: Optional[str] = None  # String reference
     args: Dict = {}
-    next_steps: Optional[List[Union["ControlFlowStep", "TaskStep"]]] = None
+    # Removed next_steps for clarity, flow is now controlled by ControlFlowStep
 
 
 class TaskStep(BaseModel):
@@ -26,15 +24,21 @@ class TaskStep(BaseModel):
 
 class ControlFlowStep(BaseModel):
     type: str = "flow"
-    flow_type: str  # e.g., "conditional", "sequential", "iterate"
-    steps: List[Union["ControlFlowStep", "TaskStep", "Condition", "Action"]] = []
+    flow_type: str  # "sequential", "conditional", "iterate"
+    steps: Optional[List[Union["ControlFlowStep", "TaskStep"]]] = (
+        None  # For sequential and potentially others
+    )
     condition: Optional[Condition] = None
     on_true: Optional[List[Union["ControlFlowStep", "TaskStep"]]] = None
     on_false: Optional[List[Union["ControlFlowStep", "TaskStep"]]] = None
     iterator: Optional[str] = None  # Key in the context to iterate over
-    operation: Optional[Action] = None
+    iteration_variable: Optional[str] = (
+        "item"  # Name of the variable for the current item in the loop
+    )
+    operation: Optional[Union[Action, TaskStep, "ControlFlowStep"]] = (
+        None  # Operation to perform in the loop
+    )
 
 
 # To allow recursive definitions
 ControlFlowStep.update_forward_refs()
-Action.update_forward_refs()
