@@ -17,8 +17,6 @@ from llm_backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-PORT = os.getenv("PORT", 8000)
-
 
 def __setup_logging(log_level: str):
     log_level = getattr(logging, "WARNING")

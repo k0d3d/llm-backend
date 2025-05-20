@@ -7,8 +7,15 @@ from llm_backend.core.types.replicate import ExampleInput, PayloadInput, Props
 
 
 class ReplicateTeam:
-    def __init__(self, run_input: RunInput):
-        self.run_input = run_input
+    def __init__(
+      self, 
+      prompt,
+      description,
+      example_input,
+      ):
+        self.prompt = prompt
+        self.description = description
+        self.example_input = example_input
 
 
     def replicate_agent(self):
@@ -70,6 +77,9 @@ class ReplicateTeam:
           return "True"
 
 
+      return replicate_agent
+
+
     def extract_props_agent(self):
         extract_props_agent = Agent(
             "openai:gpt-4o",
@@ -122,34 +132,23 @@ class ReplicateTeam:
 
 
     def run(self):
-        props = self.extract_props_agent.run_sync(
+        props_agent = self.extract_props_agent()
+        props = props_agent.run_sync(
             "Extract the properties from the example_input.",
-            deps={
-                "beta": 0.7,
-                "seed": 0,
-                "text": "StyleTTS 2 is a text-to-speech model that leverages style diffusion and adversarial training with large speech language models to achieve human-level text-to-speech synthesis.",
-                "alpha": 0.3,
-                "diffusion_steps": 10,
-                "embedding_scale": 1.5,
-            },
+            deps=self.example_input,
         )
 
-        result = self.replicate_agent.run_sync(
+        replicate_agent = self.replicate_agent()
+        result = replicate_agent.run_sync(
             "Rewrite the example_input based on the affected properties provided.",
             deps=ExampleInput(
-                example_input={
-                  "beta": 0.7,
-                  "seed": 0,
-                  "text": "StyleTTS 2 is a text-to-speech model that leverages style diffusion and adversarial training with large speech language models to achieve human-level text-to-speech synthesis.",
-                  "alpha": 0.3,
-                  "diffusion_steps": 10,
-                  "embedding_scale": 1.5,
-              },
-              description="Generates speech from text",
-              prompt=self.run_input.prompt,
-              props=props.output,
-          ),
+                example_input=self.example_input,
+                description=self.description,
+                prompt=self.prompt,
+                props=props.output,
+            ),
         )
 
         return result.output
+
         
