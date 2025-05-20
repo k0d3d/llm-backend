@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from llm_backend.agents.replicate_agent import ReplicateTeam
+from llm_backend.agents.replicate_team import ReplicateTeam
 from llm_backend.core.types.common import AgentTools, RunInput
 
 

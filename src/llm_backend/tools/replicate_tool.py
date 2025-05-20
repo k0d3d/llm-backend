@@ -87,22 +87,3 @@ class InputPromptSchema(DictToClass, extra="allow"):
     )
 
 
-
-
-def parse_json_input(input_data):
-    # Check if input is already a JSON-like object (dictionary or list)
-    if isinstance(input_data, (dict, list)):
-        return input_data
-
-    elif isinstance(input_data, str):
-        try:
-            # Attempt to load the JSON string into a Python object
-            json_object = json.loads(input_data)
-            return json_object
-        except json.JSONDecodeError as e:
-            # Handle the case where the input string is not valid JSON
-            return None
-
-    else:
-        return None
-
