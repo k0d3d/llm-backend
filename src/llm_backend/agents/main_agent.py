@@ -1,28 +1,22 @@
-from pydantic_ai import Agent, RunContext
-
-roulette_agent = Agent(
-    "openai:gpt-4o",
-    deps_type=int,
-    output_type=bool,
-    system_prompt=(
-        "Use the `roulette_wheel` function to see if the "
-        "customer has won based on the number they provide."
-    ),
-)
-
-
-@roulette_agent.tool
-async def roulette_wheel(ctx: RunContext[int], square: int) -> str:
-    """check if the square is a winner"""
-    return "winner" if square == ctx.deps else "loser"
+from llm_backend.agents.replicate_agent import ReplicateTeam
 
 
 
-def run_roulette_agent():
-  success_number = 5
-  result = roulette_agent.run_sync("I bet five is the winner", deps=success_number)
-  print(result.output)
-  result = roulette_agent.run_sync("Put my money on square eighteen", deps=success_number)
-  print(result.output)
-  return result.output
-    
+
+
+
+
+def run_replicate_team():
+    replicate_team = ReplicateTeam()
+    replicate_team.run()
+
+
+async def run_iter():
+    replicate_team = ReplicateTeam()
+    nodes = []
+    # Begin an AgentRun, which is an async-iterable over the nodes of the agent's graph
+    async with replicate_team.replicate_agent.iter("Extract the properties from the example_input.", deps={"beta": 0.7, "seed": 0, "text": "StyleTTS 2 is a text-to-speech model that leverages style diffusion and adversarial training with large speech language models to achieve human-level text-to-speech synthesis.", "alpha": 0.3, "diffusion_steps": 10, "embedding_scale": 1.5}) as agent_run:
+        async for node in agent_run:
+            # Each node represents a step in the agent's execution
+            nodes.append(node)
+    print(nodes)
