@@ -4,18 +4,56 @@ import json
 from llm_backend.core.types.common import RunInput
 from pydantic_ai import Agent, ModelRetry, RunContext
 from llm_backend.core.types.replicate import ExampleInput, PayloadInput, Props
+from llm_backend.tools.replicate_tool import run_replicate
 
 
 class ReplicateTeam:
     def __init__(
       self, 
       prompt,
-      description,
-      example_input,
+      tool_config,
+      run_input: RunInput,
       ):
         self.prompt = prompt
-        self.description = description
-        self.example_input = example_input
+        self.description = tool_config.get("description")
+        self.example_input = tool_config.get("example_input")
+        self.latest_version = tool_config.get("latest_version")
+        self.run_input = run_input
+
+    def api_interaction_agent(self):
+        """
+          API Interaction Agent
+          Handles authentication with Replicate.com
+          Sends requests and receives responses
+          Manages retry logic and error handling
+        """
+        api_interaction_agent = Agent(
+            "openai:gpt-4o",
+            deps_type=PayloadInput, 
+            output_type=str,
+            system_prompt=(
+                """
+                Provided with a payload to send to replicate.com
+                
+                """
+            ),
+        )
+
+        @api_interaction_agent.tool
+        def use_replicate_tool(ctx: RunContext[PayloadInput]):
+            """
+            Send the request to replicate.com and receive the response.
+            """
+            return run_replicate(
+                run_input=self.run_input,
+                model_params={
+                  "example_input": self.example_input,
+                  "latest_version": self.latest_version,
+                },
+                input=ctx.deps.input,
+            )
+
+        return api_interaction_agent
 
 
     def replicate_agent(self):
@@ -139,7 +177,7 @@ class ReplicateTeam:
         )
 
         replicate_agent = self.replicate_agent()
-        result = replicate_agent.run_sync(
+        replicate_result = replicate_agent.run_sync(
             "Rewrite the example_input based on the affected properties provided.",
             deps=ExampleInput(
                 example_input=self.example_input,
@@ -149,6 +187,12 @@ class ReplicateTeam:
             ),
         )
 
-        return result.output
+        api_interaction_agent = self.api_interaction_agent()
+        api_result =  api_interaction_agent.run_sync(
+            "Send the request to replicate.com and receive the response.",
+            deps=replicate_result.output,
+        )
+
+        return api_result.output
 
         
