@@ -1,11 +1,10 @@
 import os
 from enum import Enum
 from typing import List, Union, Optional
-from pydantic import AnyHttpUrl, validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, ConfigDict, validator
 
 
-class AppConfig(BaseSettings):
+class AppConfig():
     """
     Config for settings classes that allows for
     combining Setings classes with different env_prefix settings.
@@ -14,7 +13,7 @@ class AppConfig(BaseSettings):
     https://github.com/pydantic/pydantic/issues/1727#issuecomment-658881926
     """
 
-    model_config = SettingsConfigDict(case_sensitive=True, validate_default=False)
+    model_config = ConfigDict(case_sensitive=True, validate_default=False)
 
     @classmethod
     def prepare_field(cls, field) -> None:
@@ -88,7 +87,7 @@ class Settings:
         return 6
 
     class Config(AppConfig):
-        model_config = SettingsConfigDict(env_prefix="", validate_default=False)
+        model_config = ConfigDict(env_prefix="", validate_default=False)
 
 
 settings = Settings()
