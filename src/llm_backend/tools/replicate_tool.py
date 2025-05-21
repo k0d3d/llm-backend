@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from llm_backend.core.helpers import send_data_to_url
 from llm_backend.core.types.common import RunInput, MessageType
+from llm_backend.core.types.replicate import PayloadInput
 
 
 
@@ -17,7 +18,7 @@ TOHJU_NODE_API = os.getenv("TOHJU_NODE_API", "https://api.tohju.com")
 def run_replicate(
     run_input: RunInput, 
     model_params: dict,
-    input,
+    input: PayloadInput,
     ):
         # Define the URL for the POST request
         url = "https://api.replicate.com/v1/predictions"
@@ -29,10 +30,11 @@ def run_replicate(
         }
 
         # check if input is json string and attempt to convert it to object
-        if isinstance(input, str):
+        if isinstance(input, PayloadInput):
             try:
                 # Attempt to load the JSON string into a Python object
-                input = json.loads(input.replace("'", '"'))
+                input = input.model_dump()
+                # input = json.loads(input.replace("'", '"'))
             except json.JSONDecodeError as e:
                 # Handle the case where the input string is not valid JSON
                 input = {}

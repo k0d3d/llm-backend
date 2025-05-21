@@ -44,7 +44,7 @@ class ReplicateTeam:
             """
             Send the request to replicate.com and receive the response.
             """
-            print(ctx.deps.input)
+
             return run_replicate(
                 run_input=self.run_input,
                 model_params={
@@ -58,12 +58,12 @@ class ReplicateTeam:
 
 
     def replicate_agent(self):
-      replicate_agent = Agent(
-        "openai:gpt-4o",
-        deps_type=ExampleInput,
-        output_type=AgentPayload,
-        system_prompt=(
-            """
+        replicate_agent = Agent(
+            "openai:gpt-4o",
+            deps_type=ExampleInput,
+            output_type=AgentPayload,
+            system_prompt=(
+                """
             Analyze the example_input. It contains properties that are used to run a model on replicate.com. 
             The props object contains all properties and affected properties.
             The exact prompt string must be the part of the final payload.
@@ -71,67 +71,65 @@ class ReplicateTeam:
             Do not make up properties that are not in example_input.
             DO NOT wrap suggested input in a parent object
             DO NOT make up the input object. Rewrite example_input and use its schema.       
-
+            Check if the payload contains the prompt string.
           """
-        ),
-      )
+            ),
+        )
 
+        @replicate_agent.system_prompt
+        def get_example_input(ctx: RunContext[ExampleInput]):
+            return f"Example input: {ctx.deps.example_input}"
 
-      @replicate_agent.system_prompt
-      def get_example_input(ctx: RunContext[ExampleInput]):
-          return f"{ctx.deps.example_input}"
+        @replicate_agent.system_prompt
+        def get_description(ctx: RunContext[ExampleInput]):
+            return f"Model description: {ctx.deps.description}"
 
+        @replicate_agent.system_prompt
+        def get_prompt(ctx: RunContext[ExampleInput]):
+            return f"Prompt: {ctx.deps.prompt}"
 
-      @replicate_agent.system_prompt
-      def get_description(ctx: RunContext[ExampleInput]):
-          return f"{ctx.deps.description}"
+        #   @replicate_agent.tool
+        #   def check_payload_is_valid(ctx: RunContext[ExampleInput], payload: PayloadInput):
+        #       """
+        #       Check if the payload is valid based on the example_input.
+        #       """
+        #       # get all the keys from ctx.deps.example_input and compare to the keys in ctx.deps.props.all_props and ctx.deps.props.affected_props
 
-      @replicate_agent.system_prompt
-      def get_prompt(ctx: RunContext[ExampleInput]):
-          return f"{ctx.deps.prompt}"
+        #       payload_input_dict = payload.input
 
-    #   @replicate_agent.tool
-    #   def check_payload_is_valid(ctx: RunContext[ExampleInput], payload: PayloadInput):
-    #       """
-    #       Check if the payload is valid based on the example_input.
-    #       """
-    #       # get all the keys from ctx.deps.example_input and compare to the keys in ctx.deps.props.all_props and ctx.deps.props.affected_props
-          
-    #       payload_input_dict = payload.input
-          
-    #       payload_input_keys = set(payload_input_dict.keys())
-    #       all_props_set = set(ctx.deps.props.all_props)
-    #       affected_props_set = set(ctx.deps.props.affected_props)
+        #       payload_input_keys = set(payload_input_dict.keys())
+        #       all_props_set = set(ctx.deps.props.all_props)
+        #       affected_props_set = set(ctx.deps.props.affected_props)
 
-    #       # Check if all payload_input keys are in all_props
-    #       if not all_props_set.issubset(payload_input_keys):
-    #           invalid_props = all_props_set - payload_input_keys
-    #           raise ModelRetry(f"Invalid properties found: {invalid_props}")
+        #       # Check if all payload_input keys are in all_props
+        #       if not all_props_set.issubset(payload_input_keys):
+        #           invalid_props = all_props_set - payload_input_keys
+        #           raise ModelRetry(f"Invalid properties found: {invalid_props}")
 
-    #       # Check if affected_props is a subset of all_props
-    #       if not affected_props_set.issubset(payload_input_keys):
-    #           invalid_affected = affected_props_set - payload_input_keys
-    #           raise ModelRetry(f"Invalid affected properties found: {invalid_affected}")
-          
+        #       # Check if affected_props is a subset of all_props
+        #       if not affected_props_set.issubset(payload_input_keys):
+        #           invalid_affected = affected_props_set - payload_input_keys
+        #           raise ModelRetry(f"Invalid affected properties found: {invalid_affected}")
 
-    #       return "True"
+        #       return "True"
 
-      @replicate_agent.tool(retries=3)
-      def check_payload_contains_prompt(ctx: RunContext[ExampleInput], payload: AgentPayload) -> AgentPayload:
-          """
-          Check if the payload contains the prompt string and return True if it does.
-          """
-        #   print(prompt)
+        @replicate_agent.tool(retries=3)
+        def check_payload_contains_prompt(
+            ctx: RunContext[ExampleInput], payload: AgentPayload
+        ) -> AgentPayload:
+            """
+            Check if the payload values contains the exact prompt string.
+            This improves accuracy of the result.
+            
+            """
 
-          payload_input_dict = payload.input
-          print(payload_input_dict.model_dump().values())
-          if ctx.deps.prompt not in payload_input_dict.model_dump().values():
-              raise ModelRetry("Prompt not found in payload")
+            payload_input_dict = payload.input
+            if ctx.deps.prompt not in payload_input_dict.model_dump().values():
+                raise ModelRetry("Prompt not found in payload")
 
-          return payload
+            return payload
 
-
-      return replicate_agent
+        return replicate_agent
 
 
     def extract_props_agent(self):
