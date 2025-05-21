@@ -1,9 +1,5 @@
 #!/bin/bash
 
-eval $(poetry env activate)
-
-pip install pydantic-ai
-
 # Start the FastAPI server
 poetry run fastapi run src/main.py --port $PORT --workers 2 &
 api_pid=$!

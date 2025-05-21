@@ -20,6 +20,8 @@ RUN apt-get install libpq-dev gcc build-essential wkhtmltopdf ffmpeg libavcodec-
 
 RUN poetry install --no-root
 
+RUN poetry run pip install pydantic-ai
+
 RUN poetry self add poetry-plugin-dotenv@latest
 
 COPY . /app
