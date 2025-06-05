@@ -13,6 +13,7 @@ from llm_backend.core.types.replicate import PayloadInput
 
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 TOHJU_NODE_API = os.getenv("TOHJU_NODE_API", "https://api.tohju.com")
+CORE_API_URL = os.getenv("CORE_API_URL", "https://core-api-d1kvr2.asyncdev.workers.dev")
 
 
 def run_replicate(
@@ -62,6 +63,13 @@ def run_replicate(
                 },
                 # data={prediction: prediction, **crew_input},
                 url=f"{TOHJU_NODE_API}/api/webhooks/onReplicateStarted",
+                crew_input=run_input,
+                message_type=message_type,
+            )
+            send_data_to_url(
+                data={"prediction": prediction},
+                # data={prediction: prediction, **crew_input},
+                url=f"{CORE_API_URL}/from-llm",
                 crew_input=run_input,
                 message_type=message_type,
             )
