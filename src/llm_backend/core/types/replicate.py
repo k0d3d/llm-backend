@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, field_validator
 from typing import List, Dict
+from typing import Optional
 
 
 class Props(BaseModel):
@@ -26,4 +27,14 @@ class ExampleInput(BaseModel):
     prompt: str
     example_input: dict
     description: str
-    props: Props
+    props: Optional[Props] = None
+    image_file: Optional[str] = None
+    video_file: Optional[str] = None
+
+class InformationInputResponse(BaseModel):
+    continue_run: bool
+    response_information: str
+
+class InformationInputPayload(BaseModel):
+    example_input: dict
+    description: str

@@ -16,8 +16,8 @@ def run_replicate_team(run_input: RunInput):
 
   replicate_team = ReplicateTeam(
     prompt=run_input.prompt,
-    tool_config=replicate_agent_tool_config,
+    tool_config=replicate_agent_tool_config.get("data", {}),
     run_input=run_input,
   )
-  
+
   return replicate_team.run()

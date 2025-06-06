@@ -1,19 +1,21 @@
 
 import json
 
+from pydantic_ai import Agent, ModelRetry, RunContext, Tool
 from llm_backend.core.types.common import RunInput
-from pydantic_ai import Agent, ModelRetry, RunContext
-from llm_backend.core.types.replicate import ExampleInput, AgentPayload, Props
+from llm_backend.core.types.replicate import ExampleInput, AgentPayload, InformationInputResponse, Props, InformationInputPayload
 from llm_backend.tools.replicate_tool import run_replicate
 
 
 class ReplicateTeam:
     def __init__(
-      self, 
+      self,
       prompt,
       tool_config,
       run_input: RunInput,
       ):
+        print("Initializing ReplicateTeam")
+        self.demo = tool_config
         self.prompt = prompt
         self.description = tool_config.get("description")
         self.example_input = tool_config.get("example_input")
@@ -27,24 +29,13 @@ class ReplicateTeam:
           Sends requests and receives responses
           Manages retry logic and error handling
         """
-        api_interaction_agent = Agent(
-            "openai:gpt-4o",
-            deps_type=AgentPayload, 
-            output_type=str,
-            system_prompt=(
-                """
-                Provided with a payload to send to replicate.com
-                
-                """
-            ),
-        )
 
-        @api_interaction_agent.tool
-        def use_replicate_tool(ctx: RunContext[AgentPayload]):
+
+        def send_request_using_replicate_tool(ctx: RunContext[AgentPayload]):
             """
             Send the request to replicate.com and receive the response.
             """
-
+            print("Sending request to replicate.com")
             return run_replicate(
                 run_input=self.run_input,
                 model_params={
@@ -54,26 +45,88 @@ class ReplicateTeam:
                 input=ctx.deps.input,
             )
 
+        api_interaction_agent = Agent(
+            "openai:gpt-4o",
+            deps_type=AgentPayload,
+            output_type=str,
+            system_prompt=(
+                """
+                Provided with a payload, send the request to replicate.com
+
+                """
+            ),
+            tools=[
+                Tool(
+                    send_request_using_replicate_tool, takes_ctx=True
+                )
+            ]
+        )
+
+
         return api_interaction_agent
 
 
+    def information_agent(self):
+        information_agent = Agent(
+            "openai:gpt-4o",
+            deps_type=InformationInputPayload,
+            output_type=InformationInputResponse,
+            system_prompt=(
+                """
+                    Analyze the example_input. It contains properties that are used to run a model on replicate.com.
+                    Based on prompt, example input and description, respond with information about the model and indicate whether to continue to run the model.
+                    If the prompt is a request for information about the model, provide the information and continue_run must be false.
+                """
+            )
+        )
+
+        @information_agent.system_prompt
+        def model_information(ctx: RunContext[ExampleInput]):
+            return f"Example Input: {ctx.deps.example_input}. Description: {ctx.deps.description}. "
+
+        return information_agent
+
+
     def replicate_agent(self):
+        def check_payload_for_prompt(
+            ctx: RunContext[ExampleInput], payload: AgentPayload
+        ) -> AgentPayload:
+            """
+            Check if the payload values contains the exact prompt string.
+            This improves accuracy of the result.
+
+            """
+            payload_input_dict = payload.input
+
+            if ctx.deps.prompt not in payload_input_dict.model_dump().values():
+                print(payload_input_dict.model_dump().values())
+                raise ModelRetry(f"Payload does not contain the prompt. Add {ctx.deps.prompt} to the payload.")
+
+            return payload
+
+
         replicate_agent = Agent(
             "openai:gpt-4o",
             deps_type=ExampleInput,
             output_type=AgentPayload,
             system_prompt=(
                 """
-            Analyze the example_input. It contains properties that are used to run a model on replicate.com. 
-            The props object contains all properties and affected properties.
+            Analyze the example_input. It contains properties that are used to run a model on replicate.com.
+            Based on the prompt, create a json payload based on the example_input schema to send a request.
             The exact prompt string must be the part of the final payload.
+            Check for properties like input, prompt, text in the example_input schema to replace.
             The final output should be a json payload based on the example_input schema to send a request.
             Do not make up properties that are not in example_input.
             DO NOT wrap suggested input in a parent object
-            DO NOT make up the input object. Rewrite example_input and use its schema.       
+            DO NOT make up the input object. Rewrite example_input and use its schema.
             Check if the payload contains the prompt string.
           """
             ),
+            tools=[
+                Tool(
+                    check_payload_for_prompt, takes_ctx=True
+                )
+            ]
         )
 
         @replicate_agent.system_prompt
@@ -88,126 +141,39 @@ class ReplicateTeam:
         def get_prompt(ctx: RunContext[ExampleInput]):
             return f"Prompt: {ctx.deps.prompt}"
 
-        #   @replicate_agent.tool
-        #   def check_payload_is_valid(ctx: RunContext[ExampleInput], payload: PayloadInput):
-        #       """
-        #       Check if the payload is valid based on the example_input.
-        #       """
-        #       # get all the keys from ctx.deps.example_input and compare to the keys in ctx.deps.props.all_props and ctx.deps.props.affected_props
-
-        #       payload_input_dict = payload.input
-
-        #       payload_input_keys = set(payload_input_dict.keys())
-        #       all_props_set = set(ctx.deps.props.all_props)
-        #       affected_props_set = set(ctx.deps.props.affected_props)
-
-        #       # Check if all payload_input keys are in all_props
-        #       if not all_props_set.issubset(payload_input_keys):
-        #           invalid_props = all_props_set - payload_input_keys
-        #           raise ModelRetry(f"Invalid properties found: {invalid_props}")
-
-        #       # Check if affected_props is a subset of all_props
-        #       if not affected_props_set.issubset(payload_input_keys):
-        #           invalid_affected = affected_props_set - payload_input_keys
-        #           raise ModelRetry(f"Invalid affected properties found: {invalid_affected}")
-
-        #       return "True"
-
-        @replicate_agent.tool(retries=3)
-        def check_payload_contains_prompt(
-            ctx: RunContext[ExampleInput], payload: AgentPayload
-        ) -> AgentPayload:
-            """
-            Check if the payload values contains the exact prompt string.
-            This improves accuracy of the result.
-            
-            """
-
-            payload_input_dict = payload.input
-            if ctx.deps.prompt not in payload_input_dict.model_dump().values():
-                raise ModelRetry("Prompt not found in payload")
-
-            return payload
 
         return replicate_agent
 
-
-    def extract_props_agent(self):
-        extract_props_agent = Agent(
-            "openai:gpt-4o",
-            deps_type=dict,
-            output_type=Props,
-            system_prompt=(
-                """
-              Analyze the example_input. It contains properties that are used to run a model on replicate.com. 
-              Extract the properties from the example_input. 
-              Return a json object with two properties: all_props and affected_props.        
-              all_props should contain all properties from the example_input.
-              affected_props should contain only properties that are going to change based on the prompt.
-            """
-                    ),
-                )
-
-
-        @extract_props_agent.tool
-        def extract_all_props(ctx: RunContext[dict]) -> str:
-            """
-            Extract all properties from the example_input.
-            """
-            input_keys = set(ctx.deps.keys())
-            return "\n".join(input_keys)
-
-
-        @extract_props_agent.tool
-        def check_valid_input_props(ctx: RunContext[dict], props: Props) -> str:
-            """
-            Check if the input props are valid based on the prompt.
-            """
-            # get all the keys from ctx.deps and compare to the keys in props.all_props and props.affected_props
-            input_keys = set(ctx.deps.keys())
-            all_props_set = set(props.all_props)
-            affected_props_set = set(props.affected_props)
-
-            # Check if all input keys are in all_props
-            if not input_keys.issubset(all_props_set):
-                invalid_props = input_keys - all_props_set
-                raise ModelRetry(f"Invalid properties found: {invalid_props}")
-
-            # Check if affected_props is a subset of all_props
-            if not affected_props_set.issubset(all_props_set):
-                invalid_affected = affected_props_set - all_props_set
-                raise ModelRetry(f"Invalid affected properties found: {invalid_affected}")
-
-            return "True"
-
-        return extract_props_agent
-
-
     def run(self):
-        props_agent = self.extract_props_agent()
-        props = props_agent.run_sync(
-            "Extract the properties from the example_input.",
-            deps=self.example_input,
+
+        information_agent = self.information_agent()
+        information = information_agent.run_sync(
+            self.prompt,
+            deps=InformationInputPayload(
+                example_input=self.example_input,
+                description=self.description,
+            ),
         )
+
+        if not information.output.continue_run:
+            return information.output.response_information
+
 
         replicate_agent = self.replicate_agent()
         replicate_result = replicate_agent.run_sync(
             "Rewrite the example_input based on the affected properties provided.",
             deps=ExampleInput(
                 example_input=self.example_input,
-                description=self.description,
+                description=information.output.response_information,
                 prompt=self.prompt,
-                props=props.output,
+                image_file=self.run_input.document_url,
             ),
         )
 
         api_interaction_agent = self.api_interaction_agent()
-        api_result =  api_interaction_agent.run_sync(
+        api_result = api_interaction_agent.run_sync(
             "Send the request to replicate.com and receive the response.",
             deps=replicate_result.output,
         )
 
         return api_result.output
-        return replicate_result.output
-
-        
