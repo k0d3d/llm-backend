@@ -5,7 +5,7 @@ import requests
 from llm_backend.core.types.common import RunInput, MessageType, T_MessageType
 
 
-def send_data_to_url(data: str, url: str, crew_input: RunInput, message_type: T_MessageType = MessageType["AGENT_MESSAGE"]):
+def send_data_to_url(data: dict, url: str, crew_input: RunInput, message_type: T_MessageType = MessageType["AGENT_MESSAGE"]):
     """
     Send data to a server using a stream.
 
@@ -29,6 +29,8 @@ def send_data_to_url(data: str, url: str, crew_input: RunInput, message_type: T_
         "logId": crew_input.log_id,
         "prompt": crew_input.prompt
     }
+
+    print('url', url)
 
     # Convert data to JSON format as it's typically expected for a POST request's body
     json_data = json.dumps(payload_data)

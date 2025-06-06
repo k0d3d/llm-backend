@@ -1,11 +1,14 @@
 
-import json
+import os
 
 from pydantic_ai import Agent, ModelRetry, RunContext, Tool
-from llm_backend.core.types.common import RunInput
-from llm_backend.core.types.replicate import ExampleInput, AgentPayload, InformationInputResponse, Props, InformationInputPayload
+from llm_backend.core.types.common import MessageType, RunInput
+from llm_backend.core.types.replicate import ExampleInput, AgentPayload, InformationInputResponse, InformationInputPayload
 from llm_backend.tools.replicate_tool import run_replicate
+from llm_backend.core.helpers import send_data_to_url
 
+TOHJU_NODE_API = os.getenv("TOHJU_NODE_API", "https://api.tohju.com")
+CORE_API_URL = os.getenv("CORE_API_URL", "https://core-api-d1kvr2.asyncdev.workers.dev")
 
 class ReplicateTeam:
     def __init__(
@@ -156,6 +159,14 @@ class ReplicateTeam:
         )
 
         if not information.output.continue_run:
+            message_type = MessageType["REPLICATE_PREDICTION"]
+            send_data_to_url(
+                data=information.output.response_information,
+                # data={prediction: prediction, **crew_input},
+                url=f"{CORE_API_URL}/from-llm",
+                crew_input=self.run_input,
+                message_type=message_type,
+            )
             return information.output.response_information
 
 
