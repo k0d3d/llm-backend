@@ -79,13 +79,15 @@ class ReplicateTeam:
                     Analyze the example_input. It contains properties that are used to run a model on replicate.com.
                     Based on prompt, example input and description, respond with information about the model and indicate whether to continue to run the model.
                     If the prompt is a request for information about the model, provide the information and continue_run must be false.
+                    If there is an attached file url, review the prompt as a possible instruction and continue_run.
                 """
             )
         )
 
         @information_agent.system_prompt
         def model_information(ctx: RunContext[ExampleInput]):
-            return f"Example Input: {ctx.deps.example_input}. Description: {ctx.deps.description}. "
+            return f"Example Input: {ctx.deps.example_input}. Description: {ctx.deps.description}. Attached File: {ctx.deps.attached_file}. "
+
 
         return information_agent
 
@@ -102,7 +104,6 @@ class ReplicateTeam:
             payload_input_dict = payload.input
 
             if ctx.deps.prompt not in payload_input_dict.model_dump().values():
-                print(payload_input_dict.model_dump().values())
                 raise ModelRetry(f"Payload does not contain the prompt. Add {ctx.deps.prompt} to the payload.")
 
             return payload
@@ -118,6 +119,8 @@ class ReplicateTeam:
             Based on the prompt, create a json payload based on the example_input schema to send a request.
             The exact prompt string must be the part of the final payload.
             Check for properties like input, prompt, text in the example_input schema to replace.
+            Check for properties like image, image_file, image_url, input_image in the example_input schema
+            and replace it if a attached image is provided.
             The final output should be a json payload based on the example_input schema to send a request.
             Do not make up properties that are not in example_input.
             DO NOT wrap suggested input in a parent object
@@ -144,6 +147,10 @@ class ReplicateTeam:
         def get_prompt(ctx: RunContext[ExampleInput]):
             return f"Prompt: {ctx.deps.prompt}"
 
+        @replicate_agent.system_prompt
+        def get_image_file(ctx: RunContext[ExampleInput]):
+            return f"Image file url: {ctx.deps.image_file}"
+
 
         return replicate_agent
 
@@ -168,7 +175,6 @@ class ReplicateTeam:
                 message_type=message_type,
             )
             return information.output.response_information
-
 
         replicate_agent = self.replicate_agent()
         replicate_result = replicate_agent.run_sync(

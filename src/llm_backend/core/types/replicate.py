@@ -38,3 +38,4 @@ class InformationInputResponse(BaseModel):
 class InformationInputPayload(BaseModel):
     example_input: dict
     description: str
+    attached_file: Optional[str] = None

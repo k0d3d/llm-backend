@@ -1,11 +1,6 @@
 from llm_backend.agents.replicate_agent import ReplicateTeam
 
 
-
-
-
-
-
 def run_replicate_team():
     replicate_team = ReplicateTeam()
     replicate_team.run()
