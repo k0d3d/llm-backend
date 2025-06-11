@@ -23,6 +23,7 @@ class ReplicateTeam:
         self.description = tool_config.get("description")
         self.example_input = tool_config.get("example_input")
         self.latest_version = tool_config.get("latest_version")
+        self.model_name = tool_config.get("name")
         self.run_input = run_input
 
     def api_interaction_agent(self):
@@ -46,6 +47,7 @@ class ReplicateTeam:
                   "latest_version": self.latest_version,
                 },
                 input=ctx.deps.input,
+                operation_type=ctx.deps.operationType.type,
             )
 
         api_interaction_agent = Agent(
@@ -105,6 +107,8 @@ class ReplicateTeam:
 
             if ctx.deps.prompt not in payload_input_dict.model_dump().values():
                 raise ModelRetry(f"Payload does not contain the prompt. Add {ctx.deps.prompt} to the payload.")
+            if ctx.deps.image_file not in payload_input_dict.model_dump().values():
+                raise ModelRetry(f"Payload does not contain the image file. Add {ctx.deps.image_file} to the payload.")
 
             return payload
 
@@ -121,18 +125,16 @@ class ReplicateTeam:
             Check for properties like input, prompt, text in the example_input schema to replace.
             Check for properties like image, image_file, image_url, input_image in the example_input schema
             and replace it if a attached image is provided.
-            The final output should be a json payload based on the example_input schema to send a request.
+            The final input should be a json payload based on the example_input schema to send a request.
+            Also provide the operationType value based on the description of the models capabilities. 
             Do not make up properties that are not in example_input.
             DO NOT wrap suggested input in a parent object
             DO NOT make up the input object. Rewrite example_input and use its schema.
             Check if the payload contains the prompt string.
+            if an image file is provided, check if the payload contains the image file.
           """
             ),
-            tools=[
-                Tool(
-                    check_payload_for_prompt, takes_ctx=True
-                )
-            ]
+            tools=[Tool(check_payload_for_prompt, takes_ctx=True)],
         )
 
         @replicate_agent.system_prompt
@@ -166,10 +168,11 @@ class ReplicateTeam:
         )
 
         if not information.output.continue_run:
+
             message_type = MessageType["REPLICATE_PREDICTION"]
+
             send_data_to_url(
                 data=information.output.response_information,
-                # data={prediction: prediction, **crew_input},
                 url=f"{CORE_API_URL}/from-llm",
                 crew_input=self.run_input,
                 message_type=message_type,

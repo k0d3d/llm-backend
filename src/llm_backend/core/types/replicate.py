@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import List, Dict
+from typing import List, Dict, Literal
 from typing import Optional
 
 
@@ -11,10 +11,14 @@ class PayloadInput(BaseModel):
     # allow any property
     model_config = ConfigDict(extra="allow")
 
+class OperationType(BaseModel):
+    type: Literal['image', 'video', 'text', 'audio']
+
 
 class AgentPayload(BaseModel):
     input: PayloadInput
-
+    operationType: OperationType
+    
     @field_validator('input')
     @classmethod
     def input_not_empty(cls, v: Dict) -> Dict:

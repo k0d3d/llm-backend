@@ -17,11 +17,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # open_ai_basic = ChatOpenAI(model="gpt-4o-mini", temperature=0.8)
 open_ai_basic = LLM(
-    model="gpt-4o-mini",
+    model="gpt-4.1-mini",
     temperature=0.5,
 )
 open_ai_turbo = LLM(
-    model="gpt-4",
+    model="gpt-4.1",
     temperature=0.5,
 )
 
@@ -143,12 +143,27 @@ def current_turbo_model():
 def get_available_llm_model():
     llm_list = [
         {
-            "name": "gpt-4o-mini",
+            "name": "o3",
+            "provider": LLMProvider.OPENAI,
+            "kargs": {},
+        },
+        {
+            "name": "gpt-4.1",
+            "provider": LLMProvider.OPENAI,
+            "kargs": {},
+        },
+        {
+            "name": "gpt-4.1-mini",
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },
         {
             "name": "gpt-4o",
+            "provider": LLMProvider.OPENAI,
+            "kargs": {},
+        },
+        {
+            "name": "gpt-4o-mini",
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },

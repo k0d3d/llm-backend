@@ -20,6 +20,7 @@ def run_replicate(
     run_input: RunInput, 
     model_params: dict,
     input: PayloadInput,
+    operation_type: str,
     ):
         # Define the URL for the POST request
         url = "https://api.replicate.com/v1/predictions"
@@ -59,17 +60,10 @@ def run_replicate(
             message_type = MessageType["REPLICATE_PREDICTION"]
             send_data_to_url(
                 data={
-                    "prediction": prediction
+                    "prediction": prediction,
+                    "operation_type": operation_type,
                 },
-                # data={prediction: prediction, **crew_input},
                 url=f"{TOHJU_NODE_API}/api/webhooks/onReplicateStarted",
-                crew_input=run_input,
-                message_type=message_type,
-            )
-            send_data_to_url(
-                data={"prediction": prediction},
-                # data={prediction: prediction, **crew_input},
-                url=f"{CORE_API_URL}/from-llm",
                 crew_input=run_input,
                 message_type=message_type,
             )
