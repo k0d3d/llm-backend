@@ -142,11 +142,11 @@ def current_turbo_model():
 
 def get_available_llm_model():
     llm_list = [
-        {
-            "name": "o3",
-            "provider": LLMProvider.OPENAI,
-            "kargs": {},
-        },
+        # {
+        #     "name": "o3",
+        #     "provider": LLMProvider.OPENAI,
+        #     "kargs": {},
+        # },
         {
             "name": "gpt-4.1",
             "provider": LLMProvider.OPENAI,
@@ -162,11 +162,11 @@ def get_available_llm_model():
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },
-        {
-            "name": "gpt-4o-mini",
-            "provider": LLMProvider.OPENAI,
-            "kargs": {},
-        },
+        # {
+        #     "name": "gpt-4o-mini",
+        #     "provider": LLMProvider.OPENAI,
+        #     "kargs": {},
+        # },
         {
             "name": "gemini/gemini-2.5-flash-preview-04-17",
             "provider": LLMProvider.GOOGLE,
