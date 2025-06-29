@@ -123,15 +123,16 @@ class ReplicateTeam:
             Based on the prompt, create a json payload based on the example_input schema to send a request.
             The exact prompt string must be the part of the final payload.
             Check for properties like input, prompt, text in the example_input schema to replace.
-            Check for properties like image, image_file, image_url, input_image in the example_input schema
-            and replace it if a attached image is provided.
+            Check for properties like image, image_file, image_url, input_image, first_frame_image, subject_reference, in the example_input schema
+            and replace it when attached image is provided.
             The final input should be a json payload based on the example_input schema to send a request.
-            Also provide the operationType value based on the description of the models capabilities. 
+            Also provide the operationType value based on the description of the models capabilities.
             Do not make up properties that are not in example_input.
             DO NOT wrap suggested input in a parent object
             DO NOT make up the input object. Rewrite example_input and use its schema.
             Check if the payload contains the prompt string.
-            if an image file is provided, check if the payload contains the image file.
+            if an image file is provided, check if the payload contains the image file as either image, image_file, image_url, input_image, first_frame_image, subject_reference
+            or a similar property.
           """
             ),
             tools=[Tool(check_payload_for_prompt, takes_ctx=True)],
