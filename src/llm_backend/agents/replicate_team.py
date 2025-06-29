@@ -138,7 +138,7 @@ class ReplicateTeam:
             or a similar property.
           """
             ),
-            tools=[Tool(check_payload_for_prompt, takes_ctx=True)],
+            tools=[Tool(check_payload_for_prompt, takes_ctx=True, description="Check if the payload contains the prompt string and image file.")],
         )
 
         @replicate_agent.system_prompt
