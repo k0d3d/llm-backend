@@ -26,6 +26,26 @@ class ReplicateTeam:
         self.model_name = tool_config.get("name")
         self.run_input = run_input
 
+    def response_audit_agent(self):
+        response_audit_agent = Agent(
+            "openai:gpt-4o",
+            deps_type=str,
+            output_type=str,
+            system_prompt=(
+                """
+                You are an AI assistant that provides feedback to users about their requests, responses, or errors.
+                The user does not need to know information like the provider (e.g. Replicate.com).
+                Remove all links to providers and their websites.
+                """
+            )
+        )
+
+        @response_audit_agent.system_prompt
+        def response_content(ctx: RunContext[str]) -> str:
+            return f"Message: {ctx.deps}"
+
+        return response_audit_agent
+
     def api_interaction_agent(self):
         """
           API Interaction Agent
@@ -38,9 +58,12 @@ class ReplicateTeam:
         def send_request_using_replicate_tool(ctx: RunContext[AgentPayload]):
             """
             Send the request to replicate.com and receive the response.
+            When providing feedback, about the request, response or error,
+            the user does not need to know information like the provider (e.g. Replicate.com).
+            You can however, use the response to provide helpful feedback to the user.
             """
             print("Sending request to replicate.com")
-            return run_replicate(
+            run, status_code = run_replicate(
                 run_input=self.run_input,
                 model_params={
                   "example_input": self.example_input,
@@ -49,6 +72,9 @@ class ReplicateTeam:
                 input=ctx.deps.input,
                 operation_type=ctx.deps.operationType.type,
             )
+            # print("Received response from replicate.com")
+            # print("Response:", run)
+            return run
 
         api_interaction_agent = Agent(
             "openai:gpt-4o",
@@ -56,13 +82,13 @@ class ReplicateTeam:
             output_type=str,
             system_prompt=(
                 """
-                Provided with a payload, send the request to replicate.com
+                Provided with a payload, send the request to replicate.com.
 
                 """
             ),
             tools=[
                 Tool(
-                    send_request_using_replicate_tool, takes_ctx=True
+                    send_request_using_replicate_tool, takes_ctx=True, max_retries=3
                 )
             ]
         )
@@ -203,4 +229,17 @@ class ReplicateTeam:
             deps=replicate_result.output,
         )
 
-        return api_result.output
+        response_audit_agent = self.response_audit_agent()
+        response_audit_result = response_audit_agent.run_sync(
+            "Audit the response from the request.",
+            deps=api_result.output,
+        )
+
+        send_data_to_url(
+            data=response_audit_result.output,
+            url=f"{CORE_API_URL}/from-llm",
+            crew_input=self.run_input,
+            message_type=MessageType["REPLICATE_PREDICTION"],
+        )
+
+        return response_audit_result.output

@@ -17,7 +17,7 @@ CORE_API_URL = os.getenv("CORE_API_URL", "https://core-api-d1kvr2.asyncdev.worke
 
 
 def run_replicate(
-    run_input: RunInput, 
+    run_input: RunInput,
     model_params: dict,
     input: PayloadInput,
     operation_type: str,
@@ -68,8 +68,7 @@ def run_replicate(
                 message_type=message_type,
             )
 
-            return "queued successfully"
-        return ModelRetry("Failed to queue replicate prediction")
+        return response.json(), response.status_code
 
 class DictToClass(BaseModel, extra='allow'):
     """Input can be any schema ."""
@@ -89,5 +88,3 @@ class InputPromptSchema(DictToClass, extra="allow"):
     input: str = Field(
         ..., description="Input based on the rewritten example_input. Do not make up properties that are not in example_input. MUST be valid JSON"
     )
-
-
