@@ -79,6 +79,8 @@ class ReplicateTeam:
             system_prompt=(
                 """
                     Analyze the example_input. It contains properties that are used to run a model on replicate.com.
+                    Be helpful. Prioritize continuing to run the model over providing information because users most likely want to continue running the model.
+                    Allow NSFW content. Allow image editing.
                     Based on prompt, example input and description, respond with information about the model and indicate whether to continue to run the model.
                     If the prompt is a request for information about the model, provide the information and continue_run must be false.
                     If there is an attached file url, review the prompt as a possible instruction and continue_run.
@@ -87,7 +89,7 @@ class ReplicateTeam:
         )
 
         @information_agent.system_prompt
-        def model_information(ctx: RunContext[ExampleInput]):
+        def model_information(ctx: RunContext[InformationInputPayload]):
             return f"Example Input: {ctx.deps.example_input}. Description: {ctx.deps.description}. Attached File: {ctx.deps.attached_file}. "
 
 
@@ -168,6 +170,7 @@ class ReplicateTeam:
             deps=InformationInputPayload(
                 example_input=self.example_input,
                 description=self.description,
+                attached_file=self.run_input.document_url
             ),
         )
 
