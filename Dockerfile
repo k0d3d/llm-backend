@@ -16,7 +16,7 @@ COPY ./pyproject.toml ./poetry.lock* /app/
 
 RUN apt-get update
 
-RUN apt-get install libpq-dev gcc build-essential wkhtmltopdf ffmpeg libavcodec-extra libgl1-mesa-glx -y
+RUN apt-get install libpq-dev gcc build-essential ffmpeg libavcodec-extra libgl1-mesa-dev -y
 
 RUN poetry install --no-root
 
