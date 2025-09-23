@@ -148,6 +148,10 @@ class DatabaseStateStore(HITLStateStore):
     """Database-based state store for persistence"""
     
     def __init__(self, database_url: str):
+        # Fix for Dokku/older systems that provide postgres:// instead of postgresql://
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        
         self.engine = create_engine(database_url)
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
