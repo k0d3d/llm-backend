@@ -30,6 +30,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install runtime dependencies for PostgreSQL
+RUN apt-get update && apt-get install -y \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=base /app /app
 COPY --from=base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=base /usr/local/bin /usr/local/bin
