@@ -1,10 +1,20 @@
 ARG PYTHON_VER=3.11
 
-FROM python:${PYTHON_VER} AS base
+FROM python:${PYTHON_VER}
 
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    gcc \
+    build-essential \
+    ffmpeg \
+    libavcodec-extra \
+    libgl1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry
 RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=/opt/poetry python && \
@@ -14,30 +24,18 @@ RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=/opt/poetry python
 
 COPY ./pyproject.toml ./poetry.lock* /app/
 
-RUN apt-get update
-
-RUN apt-get install libpq-dev gcc build-essential ffmpeg libavcodec-extra libgl1-mesa-dev -y
-
+# Install Python dependencies
 RUN poetry install --no-root
 
+# Install additional packages
 RUN poetry run pip install pydantic-ai==0.2.14
+RUN poetry run pip install psycopg2-binary==2.9.10
 
 RUN poetry self add poetry-plugin-dotenv@latest
 
+# Verify PostgreSQL dialect is available
+RUN python -c "import sqlalchemy; from sqlalchemy.dialects import postgresql; print('PostgreSQL dialect loaded successfully')"
+
 COPY . /app
-
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install runtime dependencies for PostgreSQL
-RUN apt-get update && apt-get install -y \
-    libpq5 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=base /app /app
-COPY --from=base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=base /usr/local/bin /usr/local/bin
-COPY --from=base /opt/poetry /opt/poetry
 
 CMD ["bash", "start.sh"]
