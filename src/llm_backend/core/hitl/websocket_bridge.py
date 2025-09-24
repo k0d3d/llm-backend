@@ -224,16 +224,18 @@ class WebSocketHITLBridge:
             return
         
         # Prepare WebSocket server API request
-        api_url = f"{self.websocket_url.replace('wss://', 'https://').replace('ws://', 'http://')}/api/send"
+        api_url = f"{self.websocket_url.replace('wss://', 'https://').replace('ws://', 'http://')}/api/update-status"
         
         payload = {
-            "message": message,
-            "user_id": user_id,
-            "session_id": session_id
+            "sessionId": session_id,
+            "userId": user_id,
+            "status": "hitl_request",
+            "action": "approval_required",
+            "data": message
         }
         
         headers = {
-            "Authorization": f"Bearer {self.websocket_api_key}",
+            "X-API-Key": self.websocket_api_key,
             "Content-Type": "application/json"
         }
         

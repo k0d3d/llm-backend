@@ -32,40 +32,69 @@ async def run_replicate_team(
     session_id: Optional[str] = Query(None, description="Session ID for WebSocket communication")
 ):
     """
-    Run Replicate team with optional HITL support
+    Run Replicate team with optional HITL workflow
     
     Backward compatible endpoint that supports both legacy direct execution
     and new HITL workflow based on enable_hitl parameter.
     """
     
+    # Debug logging for request parameters
+    print(f"🔍 DEBUG REQUEST: enable_hitl={enable_hitl}")
+    print(f"🔍 DEBUG REQUEST: user_id={user_id}")
+    print(f"🔍 DEBUG REQUEST: session_id={session_id}")
+    print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
+    print(f"🔍 DEBUG REQUEST: run_input.document_url={run_input.document_url}")
+    print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
+    print(f"🔍 DEBUG REQUEST: run_input dict={run_input.dict()}")
+    
     if enable_hitl:
         # Use new HITL orchestrator
+        from llm_backend.providers.replicate_provider import ReplicateProvider
+        
+        # Get tool config for provider
+        agent_tool_config = run_input.agent_tool_config
+        print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
+        print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: {AgentTools.REPLICATETOOL}")
+        print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
+        
+        replicate_agent_tool_config = agent_tool_config.get(AgentTools.REPLICATETOOL)
+        print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
+        
+        if replicate_agent_tool_config is None:
+            # Try alternative key formats
+            for key in agent_tool_config.keys():
+                if "replicate" in key.lower():
+                    print(f"🔍 DEBUG: Found alternative replicate key: {key}")
+                    replicate_agent_tool_config = agent_tool_config.get(key)
+                    break
+        
+        tool_config = replicate_agent_tool_config.get("data", {}) if replicate_agent_tool_config else {}
+        print(f"🔍 DEBUG: Final tool_config: {tool_config}")
+        
+        # Create provider instance
+        provider = ReplicateProvider(config={
+            "name": tool_config.get("model_name", ""),
+            "description": tool_config.get("description", ""),
+            "example_input": tool_config.get("example_input", {}),
+            "latest_version": tool_config.get("latest_version", "")
+        })
+        
         hitl_config = HITLConfig(
-            require_human_approval=True,
-            checkpoint_payload_suggestion=True,
-            checkpoint_validation_review=True,
-            checkpoint_response_review=True
+            policy="auto_with_thresholds",
+            allowed_steps=["information_review", "payload_review", "response_review"]
         )
         
         orchestrator = HITLOrchestrator(
-            provider_name="replicate",
+            provider=provider,
             config=hitl_config,
-            state_manager=state_manager,
-            websocket_bridge=websocket_bridge
+            run_input=run_input
         )
         
-        # Start HITL run
-        run_id = await orchestrator.start_run(
-            original_input=run_input.dict(),
-            user_id=user_id,
-            session_id=session_id
-        )
-        
-        # Execute run in background
-        background_tasks.add_task(orchestrator.execute_run, run_id)
+        # Execute HITL run in background
+        background_tasks.add_task(orchestrator.execute)
         
         return {
-            "run_id": run_id,
+            "run_id": orchestrator.run_id,
             "status": "queued",
             "message": "HITL run started successfully",
             "websocket_url": WEBSOCKET_URL,

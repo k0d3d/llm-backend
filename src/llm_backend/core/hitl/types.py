@@ -38,6 +38,15 @@ class HITLStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ValidationIssue(BaseModel):
+    """Validation issue found during parameter checking"""
+    field: str
+    issue: str
+    severity: str  # "error" | "warning"
+    suggested_fix: str
+    auto_fixable: bool = False
+
+
 class HITLConfig(BaseModel):
     """HITL configuration"""
     policy: HITLPolicy = HITLPolicy.AUTO

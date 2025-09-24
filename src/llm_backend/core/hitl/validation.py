@@ -42,24 +42,45 @@ class HITLValidator:
     def __init__(self, run_input: RunInput, tool_config: Dict[str, Any]):
         self.run_input = run_input
         self.tool_config = tool_config
-        self.model_name = tool_config.get("model_name", "")
+        # Extract model name from 'name' field (not 'model_name')
+        self.model_name = tool_config.get("name", "") or tool_config.get("model_name", "")
         self.example_input = tool_config.get("example_input", {})
         self.description = tool_config.get("description", "")
+        print(f"🔍 HITLValidator init: model_name='{self.model_name}' from tool_config keys: {list(tool_config.keys())}")
     
     def validate_pre_execution(self) -> List[ValidationCheckpoint]:
         """Run all pre-execution validation checkpoints"""
+        print(f"🔍 HITLValidator: Starting validation for model: {self.model_name}")
+        print(f"📝 Prompt: {self.run_input.prompt}")
+        print(f"📎 Document URL: {self.run_input.document_url}")
+        print(f"⚙️ Tool config: {self.tool_config}")
+        
         checkpoints = []
         
         # 1. Parameter Review Checkpoint
+        print("🔍 Running Parameter Review checkpoint...")
         param_checkpoint = self._validate_parameters()
+        print(f"📊 Parameter checkpoint issues: {len(param_checkpoint.validation_issues)}")
+        for issue in param_checkpoint.validation_issues:
+            print(f"  ❌ {issue.severity}: {issue.issue}")
         checkpoints.append(param_checkpoint)
         
         # 2. Input Validation Checkpoint
+        print("🔍 Running Input Validation checkpoint...")
         input_checkpoint = self._validate_inputs()
+        print(f"📊 Input checkpoint issues: {len(input_checkpoint.validation_issues)}")
+        for issue in input_checkpoint.validation_issues:
+            print(f"  ❌ {issue.severity}: {issue.issue}")
         checkpoints.append(input_checkpoint)
         
         # 3. File Validation Checkpoint
+        print("🔍 Running File Validation checkpoint...")
         file_checkpoint = self._validate_files()
+        print(f"📊 File checkpoint issues: {len(file_checkpoint.validation_issues)}")
+        for issue in file_checkpoint.validation_issues:
+            print(f"  ❌ {issue.severity}: {issue.issue}")
+        print(f"🔍 File checkpoint requires file input: {self._requires_file_input()}")
+        print(f"🔍 Model name for file check: '{self.model_name}'")
         checkpoints.append(file_checkpoint)
         
         # 4. Model Selection Checkpoint

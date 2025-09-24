@@ -4,6 +4,7 @@ HITL Orchestrator - Main workflow coordinator
 
 import time
 import uuid
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -42,22 +43,36 @@ class HITLOrchestrator:
     
     async def execute(self) -> Dict[str, Any]:
         """Main execution flow with HITL checkpoints"""
+        print(f"🚀 HITL Orchestrator starting execution for run_id: {self.run_id}")
+        print(f"📝 Prompt: {self.run_input.prompt}")
+        print(f"📎 Document URL: {self.run_input.document_url}")
+        print(f"⚙️ Config: {self.config}")
+        
         start_time = time.time()
         
         try:
             # Step 1: Information Review
+            print("🔍 Starting Step 1: Information Review")
             result = await self._step_information_review()
+            # print(f"✅ Information Review result: {result}")
             if self._is_paused(result):
+                print("⏸️ Execution paused at Information Review")
                 return result
             
             # Step 2: Payload Review
+            print("🔍 Starting Step 2: Payload Review")
             result = await self._step_payload_review()
+            print(f"✅ Payload Review result: {result}")
             if self._is_paused(result):
+                print("⏸️ Execution paused at Payload Review")
                 return result
             
             # Step 3: API Execution
+            print("🔍 Starting Step 3: API Execution")
             result = await self._step_api_execution()
+            print(f"✅ API Execution result: {result}")
             if self._is_paused(result):
+                print("⏸️ Execution paused at API Execution")
                 return result
             
             # Step 4: Response Review
@@ -73,32 +88,106 @@ class HITLOrchestrator:
         finally:
             self.state.total_execution_time_ms = int((time.time() - start_time) * 1000)
     
+    async def _send_websocket_message(self, message: Dict[str, Any]) -> None:
+        """Send HITL message via WebSocket bridge (non-blocking notification)."""
+        try:
+            print(f"📤 Preparing WebSocket HITL notification: type=hitl_approval_request")
+            
+            # Extract session info from run_input
+            session_id = getattr(self.run_input, 'session_id', None)
+            user_id = getattr(self.run_input, 'user_id', None)
+            
+            if not session_id:
+                print("⚠️ No session_id found, cannot send WebSocket message")
+                return
+            
+            # Configure bridge from environment
+            ws_url = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
+            ws_key = os.getenv("WEBSOCKET_API_KEY")
+            print(f"🔧 WebSocket config: url={ws_url}, api_key_present={bool(ws_key)}")
+            bridge = WebSocketHITLBridge(websocket_url=ws_url, websocket_api_key=ws_key)
+            
+            # Non-blocking: directly send the approval request envelope
+            envelope = {
+                "type": "hitl_approval_request",
+                "data": {
+                    "run_id": self.run_id,
+                    "checkpoint_type": str(self.state.current_step.value if hasattr(self.state.current_step, 'value') else self.state.current_step),
+                    "context": message,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "created_at": datetime.utcnow().isoformat()
+                }
+            }
+            print(f"📤 Sending WebSocket envelope to session={session_id}, user={user_id}")
+            await bridge._send_websocket_message(envelope, user_id=user_id, session_id=session_id)
+            print(f"✅ WebSocket message sent successfully to session {session_id}")
+            
+        except Exception as e:
+            print(f"❌ Failed to send WebSocket message: {e}")
+            # Don't fail the entire workflow if WebSocket fails
+    
     async def _step_information_review(self) -> Dict[str, Any]:
         """Enhanced information review checkpoint with comprehensive validation"""
+        print("🔍 Information Review: Starting validation")
         self._transition_to_step(HITLStep.INFORMATION_REVIEW)
         
         # Run comprehensive pre-execution validation
+        # Extract tool config from the correct key structure
+        agent_tool_config = self.run_input.agent_tool_config or {}
+        replicate_config = agent_tool_config.get("replicate-agent-tool", {}).get("data", {})
+        print(f"🔍 Orchestrator: Using tool_config: {replicate_config}")
+        
         validator = HITLValidator(
             run_input=self.run_input,
-            tool_config=self.run_input.agent_tool_config.get("REPLICATETOOL", {}).get("data", {})
+            tool_config=replicate_config
         )
         
+        print("🔍 Information Review: Running validation checkpoints")
         validation_checkpoints = validator.validate_pre_execution()
         validation_summary = create_hitl_validation_summary(validation_checkpoints)
         
+        print(f"📊 Validation Summary: {validation_summary}")
+        print(f"🚨 Blocking Issues: {validation_summary['blocking_issues']}")
+        print(f"📋 Checkpoints: {len(validation_summary['checkpoints'])}")
+        
         # Store validation results in state
-        self.state.validation_checkpoints = validation_summary
+        print("🔄 Storing validation results in state...")
+        try:
+            self.state.validation_checkpoints = validation_summary
+            print("✅ Validation results stored successfully")
+        except Exception as e:
+            print(f"❌ Failed to store validation results: {e}")
+            print(f"🔍 State type: {type(self.state)}")
+            print(f"🔍 Validation summary type: {type(validation_summary)}")
         
         # Get provider capabilities
-        capabilities = self.provider.get_capabilities()
-        self.state.capabilities = capabilities.dict()
+        print("🔄 Getting provider capabilities...")
+        try:
+            capabilities = self.provider.get_capabilities()
+            self.state.capabilities = capabilities.dict()
+            print(f"⚙️ Provider capabilities: {capabilities.dict()}")
+        except Exception as e:
+            print(f"❌ Failed to get provider capabilities: {e}")
+            # Create minimal capabilities to continue
+            from llm_backend.core.providers.base import ProviderCapabilities, OperationType
+            capabilities = ProviderCapabilities(
+                name="remove-bg",
+                operation_types=[OperationType.IMAGE_PROCESSING],
+                input_types=["image"],
+                output_types=["image"]
+            )
+            print(f"⚙️ Using fallback capabilities: {capabilities.dict()}")
         
         # Check if human review is required based on validation or capabilities
         blocking_issues = validation_summary["blocking_issues"] > 0
         needs_review = self._should_pause_at_information_review(capabilities) or blocking_issues
         
+        print(f"🤔 Needs review? {needs_review} (blocking_issues: {blocking_issues})")
+        
         if needs_review:
-            return self._create_pause_response(
+            print("⏸️ PAUSING for human review - sending WebSocket message")
+            pause_response = self._create_pause_response(
                 step=HITLStep.INFORMATION_REVIEW,
                 message="Model capabilities and parameters require human review",
                 actions_required=["approve", "edit_prompt", "change_model", "fix_validation_issues"],
@@ -110,17 +199,30 @@ class HITLOrchestrator:
                     "checkpoints": validation_summary["checkpoints"]
                 }
             )
+            
+            # Send WebSocket message for HITL approval request
+            print("🔄 About to call _send_websocket_message...")
+            try:
+                await self._send_websocket_message(pause_response)
+                print("🔄 _send_websocket_message completed")
+            except Exception as ws_error:
+                print(f"🔄 _send_websocket_message failed: {ws_error}")
+            return pause_response
         
+        print("✅ Information Review: Auto-approved, continuing")
         self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved based on validation and thresholds")
         return {"continue": True}
     
     async def _step_payload_review(self) -> Dict[str, Any]:
         """Enhanced payload review checkpoint with improved error handling"""
+        print("🔍 Payload Review: Starting payload creation and validation")
         self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
         
         try:
             # Create payload
+            print("🔧 Creating payload...")
             operation_type = self._infer_operation_type()
+            print(f"🎯 Operation type: {operation_type}")
             payload = self.provider.create_payload(
                 prompt=self.run_input.prompt,
                 attachments=[self.run_input.document_url] if self.run_input.document_url else [],
