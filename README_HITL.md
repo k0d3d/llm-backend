@@ -118,14 +118,53 @@ src/llm_backend/
     └── teams.py                 # Updated with HITL support
 ```
 
+## Recent Enhancements
+
+The HITL system has been significantly enhanced with the following improvements:
+
+### Enhanced Parameter Detection
+- **ReplicateProvider Validation**: Added comprehensive model-specific parameter analysis
+- **Smart Requirements Detection**: Automatically detects required text, image, and audio inputs based on model type
+- **Critical Parameter Identification**: Distinguishes between critical missing parameters and optional ones
+- **Model-Specific Rules**: Custom validation logic for different model types (remove-bg, whisper, text-to-speech, etc.)
+
+### Conservative Information Agent Behavior  
+- **HITL-Aware System Prompts**: Information agent now has different behavior when HITL is enabled
+- **Conservative Mode**: When HITL is enabled, agent requires ALL parameters to be present before continuing
+- **Missing Parameter Detection**: Agent specifically identifies and requests missing inputs
+- **Clear User Guidance**: Provides specific instructions on what users need to provide
+
+### Pre-Execution Checkpoints
+- **Comprehensive Validation System**: New `HITLValidator` class with 5 checkpoint types:
+  - Parameter Review: Verify all required parameters are present
+  - Input Validation: Check input quality and detect conflicts  
+  - File Validation: Verify required files are uploaded and accessible
+  - Model Selection: Validate model compatibility with inputs
+  - Execution Approval: Final confirmation before execution
+- **Blocking vs Non-Blocking Issues**: Distinguishes between critical errors that block execution and warnings
+- **Validation Summary**: Provides detailed checkpoint results for UI display
+
+### Improved Error Handling
+- **Critical Issue Detection**: Identifies non-auto-fixable validation failures
+- **Missing Input Identification**: Specifically identifies what inputs users need to provide
+- **Remediation Suggestions**: Provides actionable steps to fix validation issues
+- **Auto-Fix Capabilities**: Automatically fixes simple issues like parameter mapping
+- **Error Recovery**: Graceful handling of payload creation and validation errors
+
+### Enhanced Orchestrator Integration
+- **Validation Checkpoint Integration**: Information review step now runs comprehensive validation
+- **Enhanced Payload Review**: Improved error handling with critical issue detection
+- **Better User Feedback**: More detailed error messages and suggested actions
+- **Pause on Critical Issues**: System pauses execution when critical parameters are missing
+
 ## Next Steps
 
-The HITL system is now fully implemented and ready for use. To deploy:
+The following enhancements are planned for future development:
 
-1. **Database Setup**: Run migrations to create HITL tables
-2. **Environment Config**: Set required environment variables
-3. **Provider Registration**: Import `registry_setup` to auto-register providers
-4. **WebSocket Integration**: Ensure WebSocket server supports HITL message types
-5. **Testing**: Run the comprehensive test suite to verify functionality
+1. **Frontend Integration**: Update frontend to handle new validation checkpoints and error responses
+2. **Browser Agent Integration**: Full integration with browser agents for real-time feedback
+3. **Advanced Auto-Fix**: More sophisticated automatic parameter fixing capabilities
+4. **Model Registry**: Dynamic model capability detection and validation rules
+5. **User Preference Learning**: Learn from user corrections to improve validation accuracy
 
 The system maintains full backward compatibility while providing powerful new HITL capabilities for enhanced AI workflow control and human oversight.

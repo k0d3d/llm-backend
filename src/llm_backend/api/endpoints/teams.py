@@ -68,7 +68,7 @@ async def run_replicate_team(
             "run_id": run_id,
             "status": "queued",
             "message": "HITL run started successfully",
-            "websocket_url": WEBSOCKET_URL if session_id else None,
+            "websocket_url": WEBSOCKET_URL,
             "hitl_enabled": True
         }
     
@@ -81,9 +81,10 @@ async def run_replicate_team(
             prompt=run_input.prompt,
             tool_config=replicate_agent_tool_config.get("data", {}),
             run_input=run_input,
+            hitl_enabled=enable_hitl
         )
 
-        return await replicate_team.run()
+        return replicate_team.run()
 
 
 @router.post("/run-hitl")

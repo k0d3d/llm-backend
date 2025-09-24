@@ -78,56 +78,201 @@ class ReplicateProvider(AIProvider):
         )
     
     def validate_payload(self, payload: ReplicatePayload, prompt: str, attachments: List[str]) -> List[ValidationIssue]:
-        """Validate Replicate payload and return issues"""
+        """Enhanced validation with HITL parameter detection"""
         issues = []
         
-        # Check if prompt is in payload
-        prompt_found = any(prompt in str(value) for value in payload.input.values())
-        if not prompt_found:
+        # Analyze required parameters for this model
+        required_params = self._analyze_model_requirements()
+        missing_critical = self._check_critical_parameters(payload, prompt, attachments, required_params)
+        
+        # Add critical missing parameter issues
+        for missing in missing_critical:
             issues.append(ValidationIssue(
-                field="input",
-                issue="Prompt not found in payload",
+                field=missing["field"],
+                issue=missing["issue"],
                 severity="error",
-                suggested_fix=f"Add '{prompt}' to one of: {list(payload.input.keys())}",
-                auto_fixable=True
+                suggested_fix=missing["suggested_fix"],
+                auto_fixable=missing["auto_fixable"]
             ))
         
-        # Check if required image is missing
-        if attachments:
-            image_found = any(att in str(payload.input) for att in attachments)
-            if not image_found:
+        # Check if prompt is in payload when required
+        if prompt and self._requires_text_input():
+            prompt_found = any(prompt in str(value) for value in payload.input.values())
+            if not prompt_found:
                 issues.append(ValidationIssue(
                     field="input",
-                    issue="Required image not found in payload",
+                    issue="Prompt not found in payload",
                     severity="error",
-                    suggested_fix="Map image to appropriate field",
+                    suggested_fix=f"Add '{prompt}' to one of: {list(payload.input.keys())}",
                     auto_fixable=True
                 ))
         
-        # Check for required fields based on example_input
-        for key, value in self.example_input.items():
-            if key not in payload.input:
+        # Check if required files are missing
+        if self._requires_file_input() and not attachments:
+            file_type = self._get_required_file_type()
+            issues.append(ValidationIssue(
+                field="input",
+                issue=f"Required {file_type} file is missing",
+                severity="error",
+                suggested_fix=f"Upload a {file_type} file",
+                auto_fixable=False
+            ))
+        elif attachments:
+            file_found = any(att in str(payload.input) for att in attachments)
+            if not file_found:
                 issues.append(ValidationIssue(
-                    field=key,
-                    issue=f"Missing field from example_input: {key}",
-                    severity="warning",
-                    suggested_fix=f"Add {key} with default value: {value}",
+                    field="input",
+                    issue="Uploaded file not found in payload",
+                    severity="error",
+                    suggested_fix="Map uploaded file to appropriate field",
                     auto_fixable=True
                 ))
         
         # Check for empty required fields
-        required_fields = ["prompt", "text", "input"]
-        for field in required_fields:
-            if field in payload.input and not payload.input[field]:
-                issues.append(ValidationIssue(
-                    field=field,
-                    issue=f"Required field {field} is empty",
-                    severity="error",
-                    suggested_fix=f"Provide value for {field}",
-                    auto_fixable=False
-                ))
+        for field_name, field_info in required_params.items():
+            if field_info["required"] and field_name in payload.input:
+                if not payload.input[field_name]:
+                    issues.append(ValidationIssue(
+                        field=field_name,
+                        issue=f"Required field {field_name} is empty",
+                        severity="error",
+                        suggested_fix=field_info["description"],
+                        auto_fixable=False
+                    ))
         
         return issues
+    
+    def _analyze_model_requirements(self) -> dict:
+        """Analyze what parameters this specific model requires"""
+        model_lower = self.model_name.lower()
+        requirements = {}
+        
+        # Model-specific requirements
+        if "remove-bg" in model_lower or "background" in model_lower:
+            requirements.update({
+                "image": {"required": True, "type": "image", "description": "Upload an image to remove background from"},
+                "input_image": {"required": True, "type": "image", "description": "Source image for background removal"}
+            })
+        elif "whisper" in model_lower or "transcrib" in model_lower:
+            requirements.update({
+                "audio": {"required": True, "type": "audio", "description": "Upload an audio file to transcribe"},
+                "file": {"required": True, "type": "file", "description": "Audio file for transcription"}
+            })
+        elif "text-to-speech" in model_lower or "tts" in model_lower or "kokoro" in model_lower:
+            requirements.update({
+                "text": {"required": True, "type": "text", "description": "Enter text to convert to speech"},
+                "prompt": {"required": True, "type": "text", "description": "Text content for speech synthesis"}
+            })
+        elif "upscal" in model_lower or "enhance" in model_lower or "clarity" in model_lower:
+            requirements.update({
+                "image": {"required": True, "type": "image", "description": "Upload image to upscale/enhance"},
+                "input_image": {"required": True, "type": "image", "description": "Source image for enhancement"}
+            })
+        elif "nano-banana" in model_lower or "image-edit" in model_lower or "transform" in model_lower:
+            requirements.update({
+                "image": {"required": True, "type": "image", "description": "Upload image to transform"},
+                "prompt": {"required": True, "type": "text", "description": "Describe the transformation you want"},
+                "instruction": {"required": True, "type": "text", "description": "Instructions for image editing"}
+            })
+        
+        # Add general requirements from example_input
+        for key, value in self.example_input.items():
+            if key not in requirements:
+                requirements[key] = {
+                    "required": self._is_field_required(key, value),
+                    "type": self._infer_field_type(key, value),
+                    "description": self._get_field_description(key)
+                }
+        
+        return requirements
+    
+    def _check_critical_parameters(self, payload: ReplicatePayload, prompt: str, attachments: List[str], required_params: dict) -> list:
+        """Check for critical missing parameters that prevent execution"""
+        missing = []
+        
+        # Check for missing text input when required
+        if self._requires_text_input() and not prompt:
+            missing.append({
+                "field": "prompt",
+                "issue": "Text input is required but not provided",
+                "suggested_fix": "Provide a text prompt or instruction",
+                "auto_fixable": False
+            })
+        
+        # Check for missing file input when required
+        if self._requires_file_input() and not attachments:
+            file_type = self._get_required_file_type()
+            missing.append({
+                "field": "file_input",
+                "issue": f"{file_type.title()} file is required but not uploaded",
+                "suggested_fix": f"Upload a {file_type} file",
+                "auto_fixable": False
+            })
+        
+        return missing
+    
+    def _requires_text_input(self) -> bool:
+        """Check if this model requires text input"""
+        model_lower = self.model_name.lower()
+        text_required_models = ["nano-banana", "text-to-speech", "tts", "kokoro", "instruct", "chat"]
+        return any(keyword in model_lower for keyword in text_required_models)
+    
+    def _requires_file_input(self) -> bool:
+        """Check if this model requires file input"""
+        model_lower = self.model_name.lower()
+        file_required_models = ["remove-bg", "whisper", "upscal", "enhance", "clarity", "nano-banana", "image-edit"]
+        return any(keyword in model_lower for keyword in file_required_models)
+    
+    def _get_required_file_type(self) -> str:
+        """Get the type of file required by this model"""
+        model_lower = self.model_name.lower()
+        if any(keyword in model_lower for keyword in ["whisper", "transcrib", "speech"]):
+            return "audio"
+        elif any(keyword in model_lower for keyword in ["image", "upscal", "enhance", "remove-bg", "nano-banana"]):
+            return "image"
+        else:
+            return "file"
+    
+    def _is_field_required(self, key: str, value: any) -> bool:
+        """Determine if a field is required"""
+        key_lower = key.lower()
+        # Fields that are typically required when present
+        required_keywords = ["prompt", "text", "instruction", "image", "audio", "file", "input"]
+        return any(keyword in key_lower for keyword in required_keywords) and not value
+    
+    def _infer_field_type(self, key: str, value: any) -> str:
+        """Infer field type from key name and value"""
+        key_lower = key.lower()
+        if any(word in key_lower for word in ["image", "img", "photo"]):
+            return "image"
+        elif any(word in key_lower for word in ["audio", "sound", "speech"]):
+            return "audio"
+        elif any(word in key_lower for word in ["video", "clip"]):
+            return "video"
+        elif any(word in key_lower for word in ["prompt", "text", "instruction"]):
+            return "text"
+        elif isinstance(value, (int, float)):
+            return "number"
+        elif isinstance(value, bool):
+            return "boolean"
+        else:
+            return "text"
+    
+    def _get_field_description(self, key: str) -> str:
+        """Get human-readable description for field"""
+        descriptions = {
+            "prompt": "Describe what you want to create or do",
+            "text": "Enter the text content",
+            "instruction": "Provide instructions for the AI",
+            "image": "Upload an image file",
+            "input_image": "Upload the source image",
+            "audio": "Upload an audio file",
+            "file": "Upload a file",
+            "strength": "Adjustment strength (0.0 to 1.0)",
+            "steps": "Number of processing steps",
+            "guidance_scale": "How closely to follow the prompt"
+        }
+        return descriptions.get(key.lower(), f"Set the {key} parameter")
     
     def execute(self, payload: ReplicatePayload) -> ProviderResponse:
         """Execute Replicate model request"""

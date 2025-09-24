@@ -2,16 +2,16 @@
 HITL Orchestrator - Main workflow coordinator
 """
 
-import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
+from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLPolicy
+from .persistence import create_state_manager
+from .websocket_bridge import WebSocketHITLBridge
+from .validation import HITLValidator, create_hitl_validation_summary
 from llm_backend.core.providers.base import AIProvider, ProviderResponse
-from llm_backend.core.hitl.types import (
-    HITLConfig, HITLState, HITLStep, HITLStatus, HITLPolicy, StepEvent
-)
 from llm_backend.core.types.common import RunInput
 
 
@@ -74,79 +74,132 @@ class HITLOrchestrator:
             self.state.total_execution_time_ms = int((time.time() - start_time) * 1000)
     
     async def _step_information_review(self) -> Dict[str, Any]:
-        """Information review checkpoint"""
+        """Enhanced information review checkpoint with comprehensive validation"""
         self._transition_to_step(HITLStep.INFORMATION_REVIEW)
+        
+        # Run comprehensive pre-execution validation
+        validator = HITLValidator(
+            run_input=self.run_input,
+            tool_config=self.run_input.agent_tool_config.get("REPLICATETOOL", {}).get("data", {})
+        )
+        
+        validation_checkpoints = validator.validate_pre_execution()
+        validation_summary = create_hitl_validation_summary(validation_checkpoints)
+        
+        # Store validation results in state
+        self.state.validation_checkpoints = validation_summary
         
         # Get provider capabilities
         capabilities = self.provider.get_capabilities()
         self.state.capabilities = capabilities.dict()
         
-        # Check if human review is required
-        if self._should_pause_at_information_review(capabilities):
+        # Check if human review is required based on validation or capabilities
+        blocking_issues = validation_summary["blocking_issues"] > 0
+        needs_review = self._should_pause_at_information_review(capabilities) or blocking_issues
+        
+        if needs_review:
             return self._create_pause_response(
                 step=HITLStep.INFORMATION_REVIEW,
-                message="Model capabilities require human review",
-                actions_required=["approve", "edit_prompt", "change_model"],
+                message="Model capabilities and parameters require human review",
+                actions_required=["approve", "edit_prompt", "change_model", "fix_validation_issues"],
                 data={
                     "capabilities": capabilities.dict(),
-                    "confidence_score": self._calculate_information_confidence(capabilities)
+                    "confidence_score": self._calculate_information_confidence(capabilities),
+                    "validation_summary": validation_summary,
+                    "blocking_issues": validation_summary["blocking_issues"],
+                    "checkpoints": validation_summary["checkpoints"]
                 }
             )
         
-        self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved based on thresholds")
+        self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved based on validation and thresholds")
         return {"continue": True}
     
     async def _step_payload_review(self) -> Dict[str, Any]:
-        """Payload review checkpoint"""
+        """Enhanced payload review checkpoint with improved error handling"""
         self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
         
-        # Create payload
-        operation_type = self._infer_operation_type()
-        payload = self.provider.create_payload(
-            prompt=self.run_input.prompt,
-            attachments=[self.run_input.document_url] if self.run_input.document_url else [],
-            operation_type=operation_type,
-            config=self.run_input.agent_tool_config or {}
-        )
-        
-        # Validate payload
-        validation_issues = self.provider.validate_payload(
-            payload,
-            self.run_input.prompt,
-            [self.run_input.document_url] if self.run_input.document_url else []
-        )
-        
-        self.state.suggested_payload = payload.dict()
-        self.state.validation_issues = [issue.dict() for issue in validation_issues]
-        
-        # Check if human review is required
-        if self._should_pause_at_payload_review(payload, validation_issues):
+        try:
+            # Create payload
+            operation_type = self._infer_operation_type()
+            payload = self.provider.create_payload(
+                prompt=self.run_input.prompt,
+                attachments=[self.run_input.document_url] if self.run_input.document_url else [],
+                operation_type=operation_type,
+                config=self.run_input.agent_tool_config or {}
+            )
+            
+            # Validate payload with enhanced validation
+            validation_issues = self.provider.validate_payload(
+                payload,
+                self.run_input.prompt,
+                [self.run_input.document_url] if self.run_input.document_url else []
+            )
+            
+            self.state.suggested_payload = payload.dict()
+            self.state.validation_issues = [issue.dict() for issue in validation_issues]
+            
+            # Check for critical validation failures that require human intervention
+            critical_issues = [issue for issue in validation_issues if issue.severity == "error" and not issue.auto_fixable]
+            
+            if critical_issues:
+                return self._create_pause_response(
+                    step=HITLStep.PAYLOAD_REVIEW,
+                    message="Critical validation failures require human intervention",
+                    actions_required=["fix_critical_issues", "provide_missing_inputs", "change_model"],
+                    data={
+                        "suggested_payload": payload.dict(),
+                        "validation_issues": [issue.dict() for issue in validation_issues],
+                        "critical_issues": [issue.dict() for issue in critical_issues],
+                        "missing_inputs": self._identify_missing_inputs(critical_issues),
+                        "suggested_actions": self._suggest_remediation_actions(critical_issues)
+                    }
+                )
+            
+            # Check if human review is required for non-critical issues
+            if self._should_pause_at_payload_review(payload, validation_issues):
+                return self._create_pause_response(
+                    step=HITLStep.PAYLOAD_REVIEW,
+                    message="Payload requires human review",
+                    actions_required=["approve", "edit_payload", "fix_validation_issues"],
+                    data={
+                        "suggested_payload": payload.dict(),
+                        "validation_issues": [issue.dict() for issue in validation_issues],
+                        "diff_from_example": self._calculate_payload_diff(payload),
+                        "estimated_cost": self.provider.estimate_cost(payload),
+                        "auto_fixable_issues": len([issue for issue in validation_issues if issue.auto_fixable])
+                    }
+                )
+            
+            # Auto-fix validation issues if possible
+            if validation_issues:
+                fixed_payload, fix_results = self._auto_fix_payload_with_results(payload, validation_issues)
+                if fixed_payload:
+                    payload = fixed_payload
+                    self.state.suggested_payload = payload.dict()
+                    self._add_step_event(HITLStep.PAYLOAD_REVIEW, HITLStatus.RUNNING, "system", f"Auto-fixed {len(fix_results)} validation issues")
+            
+            self._add_step_event(HITLStep.PAYLOAD_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved payload")
+            return {"continue": True, "payload": payload}
+            
+        except Exception as e:
+            # Handle payload creation/validation errors
+            self._add_step_event(HITLStep.PAYLOAD_REVIEW, HITLStatus.FAILED, "system", f"Payload creation failed: {str(e)}")
             return self._create_pause_response(
                 step=HITLStep.PAYLOAD_REVIEW,
-                message="Payload requires human review",
-                actions_required=["approve", "edit_payload", "fix_validation_issues"],
+                message="Failed to create or validate payload",
+                actions_required=["retry", "change_model", "fix_configuration"],
                 data={
-                    "suggested_payload": payload.dict(),
-                    "validation_issues": [issue.dict() for issue in validation_issues],
-                    "diff_from_example": self._calculate_payload_diff(payload),
-                    "estimated_cost": self.provider.estimate_cost(payload)
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "suggested_fixes": self._suggest_payload_error_fixes(e)
                 }
             )
-        
-        # Auto-fix validation issues if possible
-        if validation_issues:
-            payload = self._auto_fix_payload(payload, validation_issues)
-            self.state.suggested_payload = payload.dict()
-        
-        self._add_step_event(HITLStep.PAYLOAD_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved payload")
-        return {"continue": True, "payload": payload}
     
     async def _step_api_execution(self) -> Dict[str, Any]:
         """API execution step"""
         self._transition_to_step(HITLStep.API_CALL, HITLStatus.RUNNING)
         
         # Get payload from previous step or state
-        payload_dict = self.state.suggested_payload
         # Reconstruct payload object (this would need proper payload class detection)
         payload = self.provider.create_payload(
             prompt=self.run_input.prompt,
@@ -388,3 +441,102 @@ class HITLOrchestrator:
     
     def _calculate_response_quality(self, response) -> float:
         return 0.8  # Placeholder
+    
+    def _identify_missing_inputs(self, critical_issues) -> Dict[str, str]:
+        """Identify what inputs are missing based on critical validation issues"""
+        missing_inputs = {}
+        
+        for issue in critical_issues:
+            if "missing" in issue.issue.lower() or "required" in issue.issue.lower():
+                if "prompt" in issue.field.lower() or "text" in issue.field.lower():
+                    missing_inputs["text_input"] = "Please provide a clear text prompt describing what you want to do"
+                elif "image" in issue.field.lower():
+                    missing_inputs["image_input"] = "Please upload an image file"
+                elif "audio" in issue.field.lower():
+                    missing_inputs["audio_input"] = "Please upload an audio file"
+                elif "file" in issue.field.lower():
+                    missing_inputs["file_input"] = "Please upload the required file"
+                else:
+                    missing_inputs[issue.field] = issue.suggested_fix
+        
+        return missing_inputs
+    
+    def _suggest_remediation_actions(self, critical_issues) -> list:
+        """Suggest specific actions to remediate critical validation issues"""
+        actions = []
+        
+        for issue in critical_issues:
+            action = {
+                "field": issue.field,
+                "issue": issue.issue,
+                "action": issue.suggested_fix,
+                "priority": "high" if issue.severity == "error" else "medium"
+            }
+            actions.append(action)
+        
+        return actions
+    
+    def _auto_fix_payload_with_results(self, payload, validation_issues):
+        """Auto-fix payload validation issues and return results"""
+        fixed_payload = payload
+        fix_results = []
+        
+        for issue in validation_issues:
+            if issue.auto_fixable:
+                try:
+                    # Apply auto-fixes based on issue type
+                    if "prompt" in issue.field.lower() and hasattr(fixed_payload, 'input'):
+                        # Map prompt to appropriate field
+                        if 'prompt' in fixed_payload.input:
+                            fixed_payload.input['prompt'] = self.run_input.prompt
+                        elif 'text' in fixed_payload.input:
+                            fixed_payload.input['text'] = self.run_input.prompt
+                        
+                        fix_results.append({
+                            "field": issue.field,
+                            "fix_applied": f"Mapped prompt to {issue.field}",
+                            "success": True
+                        })
+                    
+                    elif "image" in issue.field.lower() and self.run_input.document_url:
+                        # Map image to appropriate field
+                        if hasattr(fixed_payload, 'input') and 'image' in fixed_payload.input:
+                            fixed_payload.input['image'] = self.run_input.document_url
+                        
+                        fix_results.append({
+                            "field": issue.field,
+                            "fix_applied": f"Mapped uploaded file to {issue.field}",
+                            "success": True
+                        })
+                
+                except Exception as e:
+                    fix_results.append({
+                        "field": issue.field,
+                        "fix_applied": f"Failed to auto-fix: {str(e)}",
+                        "success": False
+                    })
+        
+        return fixed_payload if fix_results else None, fix_results
+    
+    def _suggest_payload_error_fixes(self, error: Exception) -> list:
+        """Suggest fixes for payload creation/validation errors"""
+        fixes = []
+        error_str = str(error).lower()
+        
+        if "missing" in error_str:
+            fixes.append("Provide all required parameters")
+            fixes.append("Check model documentation for required fields")
+        
+        if "invalid" in error_str or "format" in error_str:
+            fixes.append("Verify input format matches model requirements")
+            fixes.append("Check file type and size limits")
+        
+        if "authentication" in error_str or "api" in error_str:
+            fixes.append("Verify API credentials and permissions")
+            fixes.append("Check model availability and access")
+        
+        if not fixes:
+            fixes.append("Review model configuration and try again")
+            fixes.append("Contact support if the issue persists")
+        
+        return fixes
