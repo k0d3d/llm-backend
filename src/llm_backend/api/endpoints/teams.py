@@ -83,7 +83,7 @@ async def run_replicate_team(
             run_input=run_input,
         )
 
-        return replicate_team.run()
+        return await replicate_team.run()
 
 
 @router.post("/run-hitl")

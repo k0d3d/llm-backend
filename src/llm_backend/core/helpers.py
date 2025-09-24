@@ -1,5 +1,6 @@
 import json
 import requests
+import httpx
 
 from llm_backend.core.types.common import RunInput, MessageType, T_MessageType
 
@@ -43,5 +44,31 @@ def send_data_to_url(data: dict | str, url: str, crew_input: RunInput, message_t
         )
     except requests.exceptions.RequestException as e:
         print(f"Error: An error occurred while requesting {url!r}.")
+        print(f"Details: {e}")
+        return None
+
+
+async def send_data_to_url_async(data: dict | str, url: str, crew_input: RunInput, message_type: T_MessageType = MessageType["AGENT_MESSAGE"]):
+    """
+    Async variant of send_data_to_url using httpx.AsyncClient to avoid blocking the event loop.
+    """
+
+    payload_data = {
+        "sessionId": crew_input.session_id,
+        "content": data,
+        "destination": crew_input.user_email,
+        "userId": crew_input.user_id,
+        "sender": crew_input.agent_email,
+        "messageType": message_type,
+        "logId": crew_input.log_id,
+        "prompt": crew_input.prompt,
+        "operationType": data.get("operation_type", "") if isinstance(data, dict) else "text",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.post(url, json=payload_data)
+    except httpx.HTTPError as e:
+        print(f"Error: An error occurred while requesting {url!r} (async).")
         print(f"Details: {e}")
         return None

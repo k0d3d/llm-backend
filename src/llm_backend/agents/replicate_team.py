@@ -5,7 +5,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext, Tool
 from llm_backend.core.types.common import MessageType, RunInput
 from llm_backend.core.types.replicate import ExampleInput, AgentPayload, InformationInputResponse, InformationInputPayload
 from llm_backend.tools.replicate_tool import run_replicate
-from llm_backend.core.helpers import send_data_to_url
+from llm_backend.core.helpers import send_data_to_url_async
 
 TOHJU_NODE_API = os.getenv("TOHJU_NODE_API", "https://api.tohju.com")
 CORE_API_URL = os.getenv("CORE_API_URL", "https://core-api-d1kvr2.asyncdev.workers.dev")
@@ -188,10 +188,10 @@ class ReplicateTeam:
 
         return replicate_agent
 
-    def run(self):
+    async def run(self):
 
         information_agent = self.information_agent()
-        information = information_agent.run_sync(
+        information = await information_agent.run(
             self.prompt,
             deps=InformationInputPayload(
                 example_input=self.example_input,
@@ -204,7 +204,7 @@ class ReplicateTeam:
 
             message_type = MessageType["REPLICATE_PREDICTION"]
 
-            send_data_to_url(
+            await send_data_to_url_async(
                 data=information.output.response_information,
                 url=f"{CORE_API_URL}/from-llm",
                 crew_input=self.run_input,
@@ -213,7 +213,7 @@ class ReplicateTeam:
             return information.output.response_information
 
         replicate_agent = self.replicate_agent()
-        replicate_result = replicate_agent.run_sync(
+        replicate_result = await replicate_agent.run(
             "Rewrite the example_input based on the affected properties provided.",
             deps=ExampleInput(
                 example_input=self.example_input,
@@ -224,18 +224,18 @@ class ReplicateTeam:
         )
 
         api_interaction_agent = self.api_interaction_agent()
-        api_result = api_interaction_agent.run_sync(
+        api_result = await api_interaction_agent.run(
             "Send the request to replicate.com and receive the response.",
             deps=replicate_result.output,
         )
 
         response_audit_agent = self.response_audit_agent()
-        response_audit_result = response_audit_agent.run_sync(
+        response_audit_result = await response_audit_agent.run(
             "Audit the response from the request.",
             deps=api_result.output,
         )
 
-        send_data_to_url(
+        await send_data_to_url_async(
             data=response_audit_result.output,
             url=f"{CORE_API_URL}/from-llm",
             crew_input=self.run_input,
