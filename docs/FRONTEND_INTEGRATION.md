@@ -7,11 +7,12 @@ This guide provides comprehensive instructions for integrating the Human-in-the-
 1. [Overview](#overview)
 2. [API Integration](#api-integration)
 3. [WebSocket Integration](#websocket-integration)
-4. [React Components](#react-components)
-5. [State Management](#state-management)
-6. [Error Handling](#error-handling)
-7. [User Experience Patterns](#user-experience-patterns)
-8. [Complete Examples](#complete-examples)
+4. [Session Resume & State Management](#session-resume--state-management)
+5. [React Components](#react-components)
+6. [State Management](#state-management)
+7. [Error Handling](#error-handling)
+8. [User Experience Patterns](#user-experience-patterns)
+9. [Complete Examples](#complete-examples)
 
 ## Overview
 
@@ -62,13 +63,17 @@ interface ValidationIssue {
 
 // Start HITL-enabled run
 async function startHITLRun(runInput: RunInput): Promise<HITLRunResponse> {
-  const response = await fetch('/api/teams/run?enable_hitl=true', {
+  const response = await fetch('/api/hitl/run', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`
     },
-    body: JSON.stringify(runInput)
+    body: JSON.stringify({
+      run_input: runInput,
+      user_id: currentUserId,
+      session_id: currentSessionId
+    })
   });
   
   if (!response.ok) {
@@ -79,33 +84,132 @@ async function startHITLRun(runInput: RunInput): Promise<HITLRunResponse> {
 }
 
 // Get run status with validation details
-async function getRunStatus(runId: string): Promise<HITLRunResponse> {
-  const response = await fetch(`/api/hitl/runs/${runId}/status`);
+async function getRunStatus(runId: string): Promise<HITLStatusResponse> {
+  const response = await fetch(`/api/hitl/run/${runId}/status`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Status check failed: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+// Get complete run state for session resume
+async function getRunState(runId: string) {
+  const response = await fetch(`/api/hitl/run/${runId}/state`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to get run state: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+// Get active runs for session resume
+async function getActiveRuns(userId?: string, sessionId?: string, status?: string) {
+  const params = new URLSearchParams();
+  if (userId) params.append('user_id', userId);
+  if (sessionId) params.append('session_id', sessionId);
+  if (status) params.append('status', status);
+  
+  const response = await fetch(`/api/hitl/runs/active?${params}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to get active runs: ${response.statusText}`);
+  }
+  
+  return response.json();
+}
+
+// Get session-specific active runs
+async function getSessionActiveRuns(sessionId: string, userId?: string) {
+  const params = new URLSearchParams();
+  if (userId) params.append('user_id', userId);
+  
+  const response = await fetch(`/api/hitl/sessions/${sessionId}/active?${params}`, {
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Failed to get session runs: ${response.statusText}`);
+  }
+  
   return response.json();
 }
 
 // Submit approval for pending checkpoint
 async function submitApproval(
   runId: string, 
-  approvalToken: string, 
-  approved: boolean,
-  modifications?: Record<string, any>
+  approvalId: string, 
+  action: 'approve' | 'edit' | 'reject',
+  edits?: Record<string, any>,
+  reason?: string,
+  approvedBy?: string
 ): Promise<void> {
-  await fetch(`/api/hitl/runs/${runId}/approve`, {
+  const response = await fetch(`/api/hitl/run/${runId}/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
     body: JSON.stringify({
-      approval_token: approvalToken,
-      approved,
-      modifications
+      approval_id: approvalId,
+      action,
+      edits,
+      reason,
+      approved_by: approvedBy
     })
   });
+  
+  if (!response.ok) {
+    throw new Error(`Approval failed: ${response.statusText}`);
+  }
 }
-```
 
-### Enhanced Run Input with HITL Support
+// Pause a running HITL workflow
+async function pauseRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/hitl/run/${runId}/pause`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Pause failed: ${response.statusText}`);
+  }
+}
 
-```typescript
+// Resume a paused HITL workflow
+async function resumeRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/hitl/run/${runId}/resume`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Resume failed: ${response.statusText}`);
+  }
+}
+
+// Enhanced Run Input with HITL Support
+
 interface EnhancedRunInput {
   prompt: string;
   document_url?: string;
@@ -131,16 +235,796 @@ interface EnhancedRunInput {
 
 ## WebSocket Integration
 
+### HITL WebSocket Message Handling
+
+The HITL system sends real-time notifications via WebSocket when human approval is required:
+
+```typescript
+// WebSocket message structure for HITL requests
+interface HITLWebSocketMessage {
+  sessionId: string;
+  userId: string;
+  status: "hitl_request";
+  action: "approval_required";
+  data: HITLApprovalRequest;
+}
+
+interface HITLApprovalRequest {
+  run_id: string;
+  user_id: string;
+  session_id: string;
+  created_at: string;
+  context: {
+    message: string;
+    current_step: string;
+    confidence_score: number;
+    validation_summary: HITLValidationSummary;
+    checkpoints: HITLValidationCheckpoint[];
+  };
+}
+
+// Enhanced WebSocket hook for HITL detection
+const useRagWebSocket = ({ sessionId, authToken, onHITLRequest }) => {
+  // ... existing WebSocket setup
+
+  useEffect(() => {
+    if (lastMessage?.data) {
+      const parsedData = JSON.parse(lastMessage.data);
+      
+      // Detect HITL approval requests
+      if (parsedData.status === "hitl_request" || parsedData.action === "approval_required") {
+        const hitlData = {
+          run_id: parsedData.run_id || parsedData.data?.run_id,
+          user_id: parsedData.userId || parsedData.user_id,
+          session_id: parsedData.sessionId || parsedData.session_id,
+          created_at: parsedData.created_at || new Date().toISOString(),
+          context: parsedData.data?.context || parsedData.context || {
+            message: parsedData.data?.message || "Human review required",
+            validation_summary: parsedData.data?.validation_summary || { checkpoints: [] }
+          }
+        };
+
+        // Add HITL message to chat thread as inline validation card
+        addMessage({
+          id: `hitl-${hitlData.run_id || Date.now()}`,
+          content: hitlData.context.message,
+          sender: "system",
+          destination: sessionId || "",
+          createdAt: new Date().toISOString(),
+          agentSessionId: sessionId || "",
+          props: {
+            messageType: TMessageEnum.HITL_REQUEST,
+            hitlData: hitlData,
+          },
+          hitlData: hitlData,
+          type: TMessageEnum.HITL_REQUEST,
+          isFresh: true,
+        });
+
+        if (onHITLRequest) {
+          onHITLRequest(hitlData, sessionId || "");
+        }
+        return;
+      }
+    }
+  }, [lastMessage]);
+};
+```
+
+## Session Resume & State Management
+
+### Overview
+
+The HITL system provides comprehensive session resume capabilities, allowing users to leave and return to continue their workflows seamlessly. This is critical for long-running AI tasks that require human oversight.
+
+### Database Schema for Session Resume
+
+The HITL system persists complete state across three main tables:
+
+```sql
+-- Main HITL runs with complete state
+CREATE TABLE hitl_runs (
+    run_id UUID PRIMARY KEY,
+    status VARCHAR(50) NOT NULL,
+    current_step VARCHAR(50) NOT NULL,
+    provider_name VARCHAR(100) NOT NULL,
+    user_id VARCHAR(255),
+    session_id VARCHAR(255),
+    original_input JSONB NOT NULL,
+    hitl_config JSONB NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    expires_at TIMESTAMP,
+    
+    -- Step artifacts for resume
+    capabilities JSONB,
+    suggested_payload JSONB,
+    validation_issues JSONB,
+    raw_response JSONB,
+    processed_response TEXT,
+    final_result TEXT,
+    
+    -- Human interaction state
+    pending_actions JSONB,
+    approval_token VARCHAR(255),
+    
+    -- Metrics
+    total_execution_time_ms INTEGER DEFAULT 0,
+    human_review_time_ms INTEGER DEFAULT 0
+);
+
+-- Complete audit trail of all steps
+CREATE TABLE hitl_step_events (
+    id SERIAL PRIMARY KEY,
+    run_id UUID NOT NULL,
+    step VARCHAR(50) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    timestamp TIMESTAMP DEFAULT NOW(),
+    actor VARCHAR(255) NOT NULL, -- 'system' or user_id
+    message TEXT,
+    metadata JSONB
+);
+
+-- Individual approval tracking
+CREATE TABLE hitl_approvals (
+    id SERIAL PRIMARY KEY,
+    run_id UUID NOT NULL,
+    approval_id VARCHAR(255) UNIQUE NOT NULL,
+    checkpoint_type VARCHAR(100) NOT NULL,
+    context JSONB NOT NULL,
+    response JSONB,
+    approved_by VARCHAR(255),
+    approved_at TIMESTAMP,
+    expires_at TIMESTAMP
+);
+
+### API Endpoints for Session Resume
+
+```typescript
+// Get all active HITL runs for a user/session
+interface GetActiveRunsRequest {
+  user_id?: string;
+  session_id?: string;
+  status?: 'awaiting_human' | 'running' | 'all';
+}
+
+interface ActiveRunSummary {
+  run_id: string;
+  status: string;
+  current_step: string;
+  created_at: string;
+  expires_at?: string;
+  pending_actions: string[];
+  context_summary: string;
+}
+
+// GET /api/hitl/runs/active
+async function getActiveHITLRuns(params: GetActiveRunsRequest): Promise<ActiveRunSummary[]> {
+  const query = new URLSearchParams(params as any).toString();
+  const response = await fetch(`/api/hitl/runs/active?${query}`);
+  return response.json();
+}
+
+// Get complete run state for resume
+interface RunStateResponse {
+  run_id: string;
+  status: string;
+  current_step: string;
+  original_input: any;
+  hitl_config: any;
+  
+  // Current state artifacts
+  capabilities?: any;
+  suggested_payload?: any;
+  validation_issues?: ValidationIssue[];
+  
+  // Pending human actions
+  pending_actions: string[];
+  approval_token?: string;
+  expires_at?: string;
+  
+  // Step history for context
+  step_history: StepEvent[];
+  
+  // Validation summary for current step
+  validation_summary?: HITLValidationSummary;
+}
+
+// GET /api/hitl/runs/{run_id}/state
+async function getRunState(runId: string): Promise<RunStateResponse> {
+  const response = await fetch(`/api/hitl/runs/${runId}/state`);
+  return response.json();
+}
+
+// Resume execution from current step
+interface ResumeRunRequest {
+  run_id: string;
+  action: 'continue' | 'approve' | 'edit' | 'cancel';
+  modifications?: Record<string, any>;
+  approval_token?: string;
+}
+
+// POST /api/hitl/runs/{run_id}/resume
+async function resumeRun(request: ResumeRunRequest): Promise<HITLRunResponse> {
+  const response = await fetch(`/api/hitl/runs/${request.run_id}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request)
+  });
+  return response.json();
+}
+```
+
+### Frontend Session Resume Implementation
+
+```typescript
+// Session store enhancement for HITL resume
+interface SessionState {
+  activeHITLRuns: ActiveRunSummary[];
+  pendingApprovals: Map<string, HITLApprovalRequest>;
+  resumeInProgress: Set<string>;
+}
+
+// Enhanced session store
+const useSessionStore = create<SessionState>((set, get) => ({
+  activeHITLRuns: [],
+  pendingApprovals: new Map(),
+  resumeInProgress: new Set(),
+
+  // Load active HITL runs when session starts
+  loadActiveHITLRuns: async (sessionId: string, userId: string) => {
+    try {
+      const runs = await getActiveHITLRuns({ session_id: sessionId, user_id: userId });
+      set({ activeHITLRuns: runs });
+      
+      // Load detailed state for awaiting_human runs
+      const awaitingRuns = runs.filter(r => r.status === 'awaiting_human');
+      const pendingApprovals = new Map();
+      
+      for (const run of awaitingRuns) {
+        const state = await getRunState(run.run_id);
+        if (state.pending_actions.length > 0) {
+          pendingApprovals.set(run.run_id, {
+            run_id: run.run_id,
+            user_id: userId,
+            session_id: sessionId,
+            created_at: run.created_at,
+            context: {
+              message: state.context_summary || 'Human review required',
+              current_step: state.current_step,
+              confidence_score: 0.8,
+              validation_summary: state.validation_summary || { checkpoints: [] }
+            }
+          });
+        }
+      }
+      
+      set({ pendingApprovals });
+    } catch (error) {
+      console.error('Failed to load active HITL runs:', error);
+    }
+  },
+
+  // Resume a specific HITL run
+  resumeHITLRun: async (runId: string, action: string, modifications?: any) => {
+    const { resumeInProgress } = get();
+    if (resumeInProgress.has(runId)) return;
+
+    set({ resumeInProgress: new Set([...resumeInProgress, runId]) });
+    
+    try {
+      const result = await resumeRun({
+        run_id: runId,
+        action: action as any,
+        modifications
+      });
+      
+      // Update local state
+      const { activeHITLRuns, pendingApprovals } = get();
+      const updatedRuns = activeHITLRuns.map(run => 
+        run.run_id === runId ? { ...run, status: result.status } : run
+      );
+      
+      const updatedApprovals = new Map(pendingApprovals);
+      if (result.status !== 'awaiting_human') {
+        updatedApprovals.delete(runId);
+      }
+      
+      set({ 
+        activeHITLRuns: updatedRuns,
+        pendingApprovals: updatedApprovals,
+        resumeInProgress: new Set([...resumeInProgress].filter(id => id !== runId))
+      });
+      
+      return result;
+    } catch (error) {
+      console.error('Failed to resume HITL run:', error);
+      set({ 
+        resumeInProgress: new Set([...resumeInProgress].filter(id => id !== runId))
+      });
+      throw error;
+    }
+  }
+}));
+
+// Session initialization with HITL resume
+const ChatSession = ({ sessionId, userId }) => {
+  const { loadActiveHITLRuns, pendingApprovals } = useSessionStore();
+  const addMessage = useThreadStore(state => state.addMessage);
+
+  useEffect(() => {
+    // Load active HITL runs when session starts
+    loadActiveHITLRuns(sessionId, userId);
+  }, [sessionId, userId]);
+
+  useEffect(() => {
+    // Add pending approvals as inline messages in chat
+    pendingApprovals.forEach((hitlData, runId) => {
+      addMessage({
+        id: `hitl-resume-${runId}`,
+        content: hitlData.context.message,
+        sender: "system",
+        destination: sessionId,
+        createdAt: hitlData.created_at,
+        agentSessionId: sessionId,
+        props: {
+          messageType: TMessageEnum.HITL_REQUEST,
+          hitlData: hitlData,
+        },
+        hitlData: hitlData,
+        type: TMessageEnum.HITL_REQUEST,
+        isFresh: false, // Not fresh since it's resumed
+      });
+    });
+  }, [pendingApprovals]);
+
+  return <ChatThread sessionId={sessionId} />;
+};
+```
+
+### Resume UX Patterns
+
+```typescript
+// Resume indicator component
+const HITLResumeIndicator = ({ runs }: { runs: ActiveRunSummary[] }) => {
+  if (runs.length === 0) return null;
+
+  return (
+    <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-4">
+      <div className="flex">
+        <div className="flex-shrink-0">
+          <ClockIcon className="h-5 w-5 text-blue-400" />
+        </div>
+        <div className="ml-3">
+          <p className="text-sm text-blue-700">
+            You have {runs.length} pending HITL approval{runs.length > 1 ? 's' : ''} from previous sessions.
+          </p>
+          <div className="mt-2 space-y-1">
+            {runs.map(run => (
+              <div key={run.run_id} className="text-xs text-blue-600">
+                • {run.context_summary} (Step: {run.current_step})
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Enhanced HITL validation card with resume context
+const HITLValidationCard = ({ hitlData, isResumed = false, onApprovalComplete }) => {
+  return (
+    <div className="hitl-validation-inline mb-3">
+      {/* Resume indicator */}
+      {isResumed && (
+        <div className="bg-amber-50 border border-amber-200 rounded-md p-2 mb-2">
+          <div className="flex items-center">
+            <RefreshIcon className="h-4 w-4 text-amber-600 mr-2" />
+            <span className="text-sm text-amber-800">Resumed from previous session</span>
+          </div>
+        </div>
+      )}
+      
+      {/* System message style header */}
+      <div className="d-flex align-items-center mb-2">
+        <div className="bg-warning rounded-circle p-1 me-2" style={{ width: '24px', height: '24px' }}>
+          <i className="bi bi-exclamation-triangle-fill text-white" style={{ fontSize: '12px' }}></i>
+        </div>
+        <span className="text-muted small">System</span>
+        <span className="text-muted small ms-auto">
+          {new Date(hitlData.created_at).toLocaleTimeString()}
+          {isResumed && <span className="text-amber-600 ml-2">(Resumed)</span>}
+        </span>
+      </div>
+
+      {/* Rest of validation card... */}
+    </div>
+  );
+};
+```
+
+### Key Resume Scenarios
+
+1. **Browser Refresh**: Complete state restoration from database
+2. **Session Switch**: Load pending approvals across different chat sessions  
+3. **Timeout Recovery**: Handle expired approvals with re-authentication
+4. **Multi-device Access**: Same HITL state accessible from different devices
+5. **Collaborative Workflows**: Multiple users can view and act on shared HITL requests
+
+### Implementation Checklist
+
+- [ ] Database tables for state persistence (`hitl_runs`, `hitl_step_events`, `hitl_approvals`)
+- [ ] API endpoints for active runs and state retrieval
+- [ ] Session store enhancement for HITL resume
+- [ ] WebSocket reconnection for resumed sessions
+- [ ] UI indicators for resumed vs new HITL requests
+- [ ] Timeout and expiration handling
+- [ ] Multi-user collaboration support
+- [ ] Error recovery for failed resumes
+
+## React Components
+
+### HITL Validation Card Component
+
+```typescript
+import React, { useState } from "react";
+import { HITLApprovalRequest } from "@/lib/types";
+import { approveHITLRequest, rejectHITLRequest } from "../services/session-req";
+
+interface HITLValidationCardProps {
+  hitlData: HITLApprovalRequest;
+  onApprovalComplete?: (approved: boolean, runId: string) => void;
+  isResumed?: boolean;
+}
+
+export const HITLValidationCard: React.FC<HITLValidationCardProps> = ({
+  hitlData,
+  onApprovalComplete,
+  isResumed = false
+}) => {
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [expandedCheckpoints, setExpandedCheckpoints] = useState<Set<number>>(new Set());
+
+  const handleApprove = async () => {
+    setIsProcessing(true);
+    try {
+      await approveHITLRequest(hitlData.run_id, hitlData.user_id);
+      onApprovalComplete?.(true, hitlData.run_id);
+    } catch (error) {
+      console.error("Failed to approve HITL request:", error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!rejectionReason.trim()) {
+      alert("Please provide a reason for rejection");
+      return;
+    }
+    
+    setIsProcessing(true);
+    try {
+      await rejectHITLRequest(hitlData.run_id, hitlData.user_id, rejectionReason);
+      onApprovalComplete?.(false, hitlData.run_id);
+    } catch (error) {
+      console.error("Failed to reject HITL request:", error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const toggleCheckpoint = (index: number) => {
+    const newExpanded = new Set(expandedCheckpoints);
+    if (newExpanded.has(index)) {
+      newExpanded.delete(index);
+    } else {
+      newExpanded.add(index);
+    }
+    setExpandedCheckpoints(newExpanded);
+  };
+
+  return (
+    <div className="hitl-validation-inline mb-3">
+      {/* Resume indicator */}
+      {isResumed && (
+        <div className="bg-amber-50 border border-amber-200 rounded-md p-2 mb-2">
+          <div className="flex items-center">
+            <RefreshIcon className="h-4 w-4 text-amber-600 mr-2" />
+            <span className="text-sm text-amber-800">Resumed from previous session</span>
+          </div>
+        </div>
+      )}
+      
+      {/* System message style header */}
+      <div className="d-flex align-items-center mb-2">
+        <div className="bg-warning rounded-circle p-1 me-2" style={{ width: '24px', height: '24px' }}>
+          <i className="bi bi-exclamation-triangle-fill text-white" style={{ fontSize: '12px' }}></i>
+        </div>
+        <span className="text-muted small">System</span>
+        <span className="text-muted small ms-auto">
+          {new Date(hitlData.created_at).toLocaleTimeString()}
+          {isResumed && <span className="text-amber-600 ml-2">(Resumed)</span>}
+        </span>
+      </div>
+
+      {/* Message bubble style card */}
+      <div className="bg-light border rounded-3 p-3" style={{ maxWidth: '85%' }}>
+        <div className="d-flex align-items-center mb-2">
+          <i className="bi bi-exclamation-triangle-fill text-warning me-2"></i>
+          <strong className="text-warning">Human Review Required</strong>
+        </div>
+        
+        <p className="mb-3 text-muted">{hitlData.context.message}</p>
+
+        {/* Validation Summary Badges */}
+        {hitlData.context.validation_summary && (
+          <div className="mb-3">
+            <div className="row g-2">
+              <div className="col-6 col-md-3">
+                <span className="badge bg-success">Passed: {hitlData.context.validation_summary.total_checkpoints || 0}</span>
+              </div>
+              <div className="col-6 col-md-3">
+                <span className="badge bg-danger">Failed: {hitlData.context.validation_summary.total_issues || 0}</span>
+              </div>
+              <div className="col-6 col-md-3">
+                <span className="badge bg-secondary">Issues: {hitlData.context.validation_summary.total_issues || 0}</span>
+              </div>
+              <div className="col-6 col-md-3">
+                <span className="badge bg-warning">Blocking: {hitlData.context.validation_summary.blocking_issues || 0}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Expandable Validation Checkpoints */}
+        {hitlData.context.validation_summary?.checkpoints && hitlData.context.validation_summary.checkpoints.length > 0 && (
+          <div className="mb-3">
+            <h6 className="small text-muted mb-2">Validation Checkpoints:</h6>
+            {hitlData.context.validation_summary.checkpoints.map((checkpoint, index) => (
+              <div key={index} className="border rounded p-2 mb-2 bg-white">
+                <div 
+                  className="d-flex justify-content-between align-items-center cursor-pointer"
+                  onClick={() => toggleCheckpoint(index)}
+                >
+                  <span className="small fw-medium">{checkpoint.checkpoint_type || `Checkpoint ${index + 1}`}</span>
+                  <div className="d-flex align-items-center">
+                    <span className={`badge badge-sm me-2 ${checkpoint.passed ? 'bg-success' : 'bg-danger'}`}>
+                      {checkpoint.passed ? 'passed' : 'failed'}
+                    </span>
+                    <i className={`bi bi-chevron-${expandedCheckpoints.has(index) ? 'up' : 'down'} small`}></i>
+                  </div>
+                </div>
+                
+                {expandedCheckpoints.has(index) && (
+                  <div className="mt-2 pt-2 border-top">
+                    <p className="mb-2 text-muted small">{checkpoint.description || 'No description available'}</p>
+                    {checkpoint.issues && checkpoint.issues.length > 0 && (
+                      <div>
+                        <strong className="small">Issues:</strong>
+                        <ul className="mt-1 mb-0 small">
+                          {checkpoint.issues.map((issue, issueIndex) => (
+                            <li key={issueIndex} className="text-danger">
+                              <strong>{issue.severity || 'Issue'}:</strong> {issue.message || 'No details available'}
+                              {issue.suggestion && (
+                                <div className="text-primary mt-1">
+                                  <strong>Suggestion:</strong> {issue.suggestion}
+                                </div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        
+        {/* Action buttons */}
+        <div className="d-flex gap-2 align-items-center mt-3">
+          <button
+            className="btn btn-success btn-sm"
+            onClick={handleApprove}
+            disabled={isProcessing}
+          >
+            {isProcessing ? (
+              <>
+                <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                Processing...
+              </>
+            ) : (
+              <>
+                <i className="bi bi-check-circle me-1"></i>
+                Approve
+              </>
+            )}
+          </button>
+          
+          <div className="flex-grow-1">
+            <input
+              type="text"
+              className="form-control form-control-sm"
+              placeholder="Reason for rejection (required)"
+              value={rejectionReason}
+              onChange={(e) => setRejectionReason(e.target.value)}
+              disabled={isProcessing}
+            />
+          </div>
+          
+          <button
+            className="btn btn-danger btn-sm"
+            onClick={handleReject}
+            disabled={isProcessing || !rejectionReason.trim()}
+          >
+            {isProcessing ? (
+              <>
+                <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                Processing...
+              </>
+            ) : (
+              <>
+                <i className="bi bi-x-circle me-1"></i>
+                Reject
+              </>
+            )}
+          </button>
+        </div>
+
+        <div className="mt-2">
+          <small className="text-muted">Run ID: {hitlData.run_id}</small>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+### Message Component Integration
+
+```typescript
+// In your Message.tsx component
+import { HITLValidationCard } from './HITLValidationCard';
+import { TMessageEnum } from '@/lib/types';
+
+const Message = ({ message, ...props }) => {
+  // Handle HITL validation cards as inline messages
+  if (message.type === TMessageEnum.HITL_REQUEST && message.hitlData) {
+    return (
+      <HITLValidationCard 
+        hitlData={message.hitlData}
+        isResumed={!message.isFresh} // Resumed if not fresh
+        onApprovalComplete={(approved, runId) => {
+          console.log(`HITL ${approved ? 'approved' : 'rejected'} for run ${runId}`);
+          // Handle approval completion - remove from UI, update state, etc.
+        }}
+      />
+    );
+  }
+
+  // Regular message rendering...
+  return <div className="message">...</div>;
+};
+```
+
 ### WebSocket Hook for HITL Communication
 
 ```typescript
 import { useEffect, useState, useCallback } from 'react';
 import useWebSocket from 'react-use-websocket';
+import { useThreadStore } from '@/common/context/thread.store';
+import { TMessageEnum, HITLApprovalRequest } from '@/lib/types';
 
 interface HITLWebSocketMessage {
-  type: 'hitl_approval_request' | 'hitl_status_update' | 'hitl_error' | 'hitl_completion';
-  run_id: string;
-  data: any;
+  sessionId: string;
+  userId: string;
+  status: "hitl_request";
+  action: "approval_required";
+  data: HITLApprovalRequest;
+}
+
+interface UseRagWebSocketProps {
+  sessionId: string | null;
+  authToken: string | null;
+  onResponseReceived?: (response: string, sessionId: string) => void;
+  onError?: (error: string, sessionId: string) => void;
+  onHITLRequest?: (request: HITLApprovalRequest, sessionId: string) => void;
+}
+
+export const useRagWebSocket = ({
+  sessionId,
+  authToken,
+  onResponseReceived,
+  onError,
+  onHITLRequest,
+}: UseRagWebSocketProps) => {
+  const addMessage = useThreadStore((state) => state.addMessage);
+  const setTyping = useThreadStore((state) => state.setTyping);
+
+  const { lastMessage, sendMessage, connectionStatus } = useWebSocket(
+    sessionId ? `${WS_BASE_URL}/ws` : null,
+    {
+      shouldReconnect: () => true,
+      reconnectAttempts: 10,
+      reconnectInterval: 3000,
+    }
+  );
+
+  useEffect(() => {
+    if (lastMessage?.data) {
+      try {
+        const parsedData = JSON.parse(lastMessage.data);
+        
+        // Detect HITL approval requests
+        if (parsedData.status === "hitl_request" || parsedData.action === "approval_required") {
+          console.log("🔍 HITL request detected:", parsedData);
+          
+          const hitlData: HITLApprovalRequest = {
+            run_id: parsedData.run_id || parsedData.data?.run_id || `hitl-${Date.now()}`,
+            user_id: parsedData.userId || parsedData.user_id || "",
+            session_id: parsedData.sessionId || parsedData.session_id || sessionId || "",
+            created_at: parsedData.created_at || new Date().toISOString(),
+            context: parsedData.data?.context || parsedData.context || {
+              message: parsedData.data?.message || "Model capabilities and parameters require human review",
+              current_step: parsedData.data?.current_step || "information_review",
+              confidence_score: parsedData.data?.confidence_score || 0.8,
+              validation_summary: parsedData.data?.validation_summary || {
+                total_checkpoints: 0,
+                passed_checkpoints: 0,
+                failed_checkpoints: 0,
+                blocking_checkpoints: 0,
+                total_issues: 0,
+                blocking_issues: 0,
+                checkpoints: []
+              }
+            }
+          };
+
+          console.log("🔍 Final HITL data structure:", hitlData);
+
+          // Add HITL validation card as inline message in chat thread
+          addMessage({
+            id: `hitl-${hitlData.run_id || Date.now()}`,
+            content: hitlData.context.message || "Model capabilities and parameters require human review",
+            sender: "system",
+            destination: sessionId || "",
+            createdAt: new Date().toISOString(),
+            agentSessionId: sessionId || "",
+            props: {
+              messageType: TMessageEnum.HITL_REQUEST,
+              hitlData: hitlData,
+            },
+            hitlData: hitlData,
+            type: TMessageEnum.HITL_REQUEST,
+            isFresh: true,
+          });
+
+          if (onHITLRequest) {
+            onHITLRequest(hitlData, sessionId || "");
+          }
+          
+          setTyping(false);
+          return;
+        }
+
+        // Handle other message types...
+        
+      } catch (error) {
+        console.error("Failed to parse WebSocket message:", error);
+      }
+    }
+  }, [lastMessage, sessionId, addMessage, onHITLRequest, setTyping]);
+
+  return {
+    connectionStatus,
+    sendMessage,
+    isConnected: connectionStatus === 'Open'
+  };
+};
 }
 
 export function useHITLWebSocket(sessionId: string, onMessage?: (message: HITLWebSocketMessage) => void) {

@@ -2,7 +2,7 @@
 Provider registry for managing AI provider implementations
 """
 
-from typing import Dict, Type, Optional
+from typing import Dict, Type, Optional, List
 from llm_backend.core.providers.base import AIProvider
 from llm_backend.core.types.common import AgentTools
 

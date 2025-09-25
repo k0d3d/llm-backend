@@ -12,15 +12,23 @@ This document outlines the provider-agnostic Human-in-the-Loop (HITL) system tha
 ## Current Architecture
 
 ### Endpoint Flow
-- **Endpoint**: `POST /teams/run` in `llm_backend/api/endpoints/teams.py` → `run_replicate_team()`
-- **Agent orchestration** in `llm_backend/agents/replicate_team.py:ReplicateTeam.run()`:
+- **Primary Router**: `hitl` in `llm_backend/api/endpoints/hitl.py` (registered in `llm_backend/api/api.py`)
+- **Key Endpoints** (all prefixed by your API prefix, typically `/api`):
+  - `POST /api/hitl/run` — Start a HITL-enabled workflow
+  - `GET /api/hitl/run/{run_id}/status` — Get run status and progress
+  - `POST /api/hitl/run/{run_id}/approve` — Submit human approval/edit/reject
+  - `POST /api/hitl/run/{run_id}/pause` — Pause a running workflow
+  - `POST /api/hitl/run/{run_id}/resume` — Resume a paused or awaiting-human workflow
+  - `DELETE /api/hitl/run/{run_id}` — Cancel a workflow
+  - `GET /api/hitl/runs` — List runs
+  - `GET /api/hitl/runs/active` — List active/resumable runs (filter by `user_id`, `session_id`)
+  - `GET /api/hitl/run/{run_id}/state` — Retrieve full state for session resume
+  - `GET /api/hitl/sessions/{session_id}/active` — Session-scoped active runs
+  - `GET /api/hitl/approvals/pending` — Pending approvals for a user
+  - `GET /api/hitl/providers` — Available providers and mapped tools
 
-1. **`information_agent`** analyzes `example_input` and sets `continue_run`
-2. **If not continue**: send info to `CORE_API_URL` and return
-3. **`replicate_agent`** crafts an `AgentPayload` based on `example_input` and prompt
-4. **`api_interaction_agent`** calls `run_replicate()` to contact Replicate
-5. **`response_audit_agent`** post-processes user-facing text
-6. **Final step**: Sends result to `CORE_API_URL` and returns
+- **Orchestration**: `HITLOrchestrator` coordinates provider execution and checkpoints.
+- **Persistence**: State is managed by `create_state_manager()` and used throughout the endpoints.
 
 ### Current Data Flow (Legacy)
 ```
@@ -75,48 +83,70 @@ The new architecture separates concerns into three layers:
 - **Action**: Convert exceptions into actionable tasks
 - **Human Options**: Fix payload, override validation, or cancel
 
-## API Contract Changes
+## REST API Reference (Current)
 
-### Enhanced Response Schema
-Augment `POST /teams/run` to support asynchronous runs and HITL pauses:
+This section documents the currently implemented REST API.
 
+### Start HITL Run
+POST `/api/hitl/run`
+
+Request body:
 ```json
 {
-  "run_id": "string",
-  "status": "queued | awaiting_human | running | completed | failed | cancelled",
-  "current_step": "information_review | payload_review | response_review | api_call | done",
-  "actions_required": ["approve", "edit", "select_model", "attach_image"],
-  "message": "Human-readable guidance on why it paused or what's needed",
-  "suggested_payload": {},
-  "diff_from_example_input": {},
-  "events_url": "string",
-  "expires_at": "ISO timestamp for pending approvals"
+  "run_input": { "prompt": "...", "agent_tool_config": { "REPLICATETOOL": { "data": { "model_name": "..." } } } },
+  "hitl_config": null,
+  "user_id": "user-123",
+  "session_id": "sess-456"
 }
 ```
 
-### New HITL Management Endpoints
-
-- `POST /teams/runs` — Create a run (alternative to synchronous `/teams/run`)
-- `GET /teams/runs/{run_id}` — Fetch current status and pending action
-- `POST /teams/runs/{run_id}/approve` — Approve current step
-- `POST /teams/runs/{run_id}/reject` — Reject with reasons
-- `POST /teams/runs/{run_id}/edit` — Submit edits (prompt, payload, model/tool)
-- `POST /teams/runs/{run_id}/cancel` — Cancel the run
-- `GET /teams/runs/{run_id}/events` — Stream step changes via SSE
-- `POST /teams/runs/{run_id}/feedback` — Post-run labels/ratings
-
-### Request Configuration Options
-
+Response:
 ```json
 {
-  "run_policy": "auto | require_human | auto_with_thresholds",
-  "review_thresholds": {
-    "confidence_min": 0.8,
-    "safety_flags": ["nsfw", "pii", "copyright"]
-  },
-  "allowed_actions": ["information_review", "payload_review", "response_review"]
+  "run_id": "<uuid>",
+  "status": "queued",
+  "message": "HITL run started successfully",
+  "websocket_url": "wss://..." 
 }
 ```
+
+### Get Run Status
+GET `/api/hitl/run/{run_id}/status`
+
+Returns progress, current step, pending actions, and timestamps.
+
+### Approve/Reject/Edit Checkpoint
+POST `/api/hitl/run/{run_id}/approve`
+
+Body:
+```json
+{
+  "approval_id": "<token>",
+  "action": "approve" | "edit" | "reject",
+  "edits": {"prompt": "..."},
+  "reason": "optional",
+  "approved_by": "user-123"
+}
+```
+
+### Pause / Resume / Cancel
+POST `/api/hitl/run/{run_id}/pause`
+
+POST `/api/hitl/run/{run_id}/resume`
+
+DELETE `/api/hitl/run/{run_id}`
+
+### List Runs
+GET `/api/hitl/runs?user_id=&status=&limit=50`
+
+### Session Resume Endpoints
+- GET `/api/hitl/runs/active?user_id=&session_id=&status=` — resumable runs
+- GET `/api/hitl/run/{run_id}/state` — full state for resume
+- GET `/api/hitl/sessions/{session_id}/active?user_id=` — session-specific runs
+
+### Approvals & Providers
+- GET `/api/hitl/approvals/pending?user_id=`
+- GET `/api/hitl/providers`
 
 ## State Machine
 

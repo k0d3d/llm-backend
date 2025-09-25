@@ -68,7 +68,20 @@ async def start_hitl_run(
     request: HITLRunRequest,
     background_tasks: BackgroundTasks
 ) -> HITLRunResponse:
-    """Start a new HITL run"""
+    """
+    Start a new Human-in-the-Loop (HITL) workflow
+    
+    Creates a new HITL run that will execute with human oversight checkpoints.
+    The run executes asynchronously in the background and communicates via WebSocket
+    when human approval is required.
+    
+    - **run_input**: Complete input configuration including prompt and tool settings
+    - **hitl_config**: Optional HITL configuration (defaults to standard checkpoints)
+    - **user_id**: User identifier for approval routing
+    - **session_id**: Session identifier for WebSocket communication
+    
+    Returns run_id and WebSocket URL for real-time communication.
+    """
     
     try:
         # Get provider from tool configuration
@@ -125,7 +138,17 @@ async def start_hitl_run(
 
 @router.get("/run/{run_id}/status", response_model=HITLStatusResponse)
 async def get_run_status(run_id: str) -> HITLStatusResponse:
-    """Get status of a HITL run"""
+    """
+    Get detailed status of a HITL run
+    
+    Returns comprehensive status information including progress, step history,
+    and pending actions. Use this endpoint to monitor run progress and
+    determine if human intervention is required.
+    
+    - **run_id**: Unique identifier for the HITL run
+    
+    Returns detailed status with progress metrics and pending actions.
+    """
     
     try:
         state = await state_manager.load_state(run_id)
@@ -184,7 +207,22 @@ async def approve_checkpoint(
     run_id: str,
     approval: HITLApprovalRequest
 ) -> Dict[str, Any]:
-    """Handle human approval for a checkpoint"""
+    """
+    Submit human approval or rejection for a HITL checkpoint
+    
+    Processes human decisions for pending approval requests. Supports three actions:
+    - **approve**: Continue execution with current parameters
+    - **edit**: Continue with modified parameters (provide edits object)
+    - **reject**: Stop execution with reason
+    
+    - **approval_id**: Unique identifier for the pending approval
+    - **action**: One of 'approve', 'edit', or 'reject'
+    - **edits**: Optional modifications for 'edit' action
+    - **reason**: Required for 'reject' action, optional for others
+    - **approved_by**: User identifier submitting the approval
+    
+    Returns success confirmation and processes the approval immediately.
+    """
     
     try:
         # Process approval through WebSocket bridge
@@ -342,7 +380,15 @@ async def list_runs(
     status: Optional[str] = None,
     limit: int = 50
 ) -> Dict[str, Any]:
-    """List HITL runs"""
+    """
+    List HITL runs with optional filtering
+    
+    - **user_id**: Filter runs by user ID
+    - **status**: Filter by run status (queued, running, awaiting_human, completed, failed, cancelled)
+    - **limit**: Maximum number of runs to return (default: 50)
+    
+    Returns a list of runs with basic information for overview purposes.
+    """
     
     try:
         runs = await state_manager.list_active_runs(user_id)
@@ -357,6 +403,176 @@ async def list_runs(
         return {
             "runs": runs,
             "total": len(runs)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/runs/active")
+async def get_active_runs(
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    status: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get active HITL runs for session resume functionality
+    
+    - **user_id**: Filter runs by user ID
+    - **session_id**: Filter runs by session ID
+    - **status**: Filter by specific status (awaiting_human, running, etc.)
+    
+    Returns detailed information about active runs that can be resumed.
+    """
+    
+    try:
+        runs = await state_manager.list_active_runs(user_id)
+        
+        # Filter by session_id if provided
+        if session_id:
+            runs = [run for run in runs if run.get("session_id") == session_id]
+        
+        # Filter by status if provided (default to awaiting_human for resume)
+        if status:
+            runs = [run for run in runs if run["status"] == status]
+        else:
+            # Default to runs that can be resumed
+            runs = [run for run in runs if run["status"] in ["awaiting_human", "paused"]]
+        
+        # Enhance with resume-specific information
+        enhanced_runs = []
+        for run in runs:
+            state = await state_manager.load_state(run["run_id"])
+            if state:
+                enhanced_runs.append({
+                    "run_id": run["run_id"],
+                    "status": run["status"],
+                    "current_step": state.current_step,
+                    "created_at": state.created_at.isoformat(),
+                    "expires_at": state.expires_at.isoformat() if state.expires_at else None,
+                    "pending_actions": state.pending_actions,
+                    "context_summary": f"Step: {state.current_step}, Actions: {len(state.pending_actions)}",
+                    "user_id": run.get("user_id"),
+                    "session_id": run.get("session_id")
+                })
+        
+        return {
+            "runs": enhanced_runs,
+            "total": len(enhanced_runs)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/runs/{run_id}/state")
+async def get_run_state(run_id: str) -> Dict[str, Any]:
+    """
+    Get complete run state for session resume
+    
+    Returns all artifacts, step history, and context needed to resume a HITL workflow.
+    This endpoint provides comprehensive state information for frontend resume functionality.
+    """
+    
+    try:
+        state = await state_manager.load_state(run_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Run not found")
+        
+        return {
+            "run_id": state.run_id,
+            "status": state.status,
+            "current_step": state.current_step,
+            "original_input": state.original_input,
+            "hitl_config": state.config.dict() if state.config else {},
+            
+            # Current state artifacts
+            "capabilities": state.capabilities,
+            "suggested_payload": state.suggested_payload,
+            "validation_issues": state.validation_issues,
+            "raw_response": state.raw_response,
+            "processed_response": state.processed_response,
+            
+            # Pending human actions
+            "pending_actions": state.pending_actions,
+            "approval_token": getattr(state, 'approval_token', None),
+            "expires_at": state.expires_at.isoformat() if state.expires_at else None,
+            
+            # Step history for context
+            "step_history": [
+                {
+                    "step": event.step,
+                    "status": event.status,
+                    "timestamp": event.timestamp.isoformat(),
+                    "actor": event.actor,
+                    "message": event.message,
+                    "metadata": event.metadata
+                }
+                for event in state.step_history
+            ],
+            
+            # Validation summary for current step
+            "validation_summary": getattr(state, 'validation_summary', None),
+            
+            # Timestamps
+            "created_at": state.created_at.isoformat(),
+            "updated_at": state.updated_at.isoformat(),
+            
+            # Metrics
+            "total_execution_time_ms": getattr(state, 'total_execution_time_ms', 0),
+            "human_review_time_ms": getattr(state, 'human_review_time_ms', 0)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/active")
+async def get_session_active_runs(
+    session_id: str,
+    user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get all active HITL runs for a specific session
+    
+    This endpoint is specifically designed for session initialization,
+    allowing the frontend to load all pending HITL requests when a user
+    opens or resumes a chat session.
+    """
+    
+    try:
+        runs = await state_manager.list_active_runs(user_id)
+        
+        # Filter by session_id and active statuses
+        session_runs = [
+            run for run in runs 
+            if run.get("session_id") == session_id 
+            and run["status"] in ["awaiting_human", "paused", "running"]
+        ]
+        
+        # Get detailed state for each run
+        detailed_runs = []
+        for run in session_runs:
+            state = await state_manager.load_state(run["run_id"])
+            if state:
+                detailed_runs.append({
+                    "run_id": run["run_id"],
+                    "status": run["status"],
+                    "current_step": state.current_step,
+                    "created_at": state.created_at.isoformat(),
+                    "message": f"HITL approval required for {state.current_step}",
+                    "pending_actions": state.pending_actions,
+                    "expires_at": state.expires_at.isoformat() if state.expires_at else None,
+                    "validation_summary": getattr(state, 'validation_summary', None)
+                })
+        
+        return {
+            "session_id": session_id,
+            "runs": detailed_runs,
+            "total": len(detailed_runs),
+            "has_pending_approvals": len([r for r in detailed_runs if r["status"] == "awaiting_human"]) > 0
         }
         
     except Exception as e:
