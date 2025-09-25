@@ -39,13 +39,13 @@ async def run_replicate_team(
     """
     
     # Debug logging for request parameters
-    print(f"🔍 DEBUG REQUEST: enable_hitl={enable_hitl}")
-    print(f"🔍 DEBUG REQUEST: user_id={user_id}")
-    print(f"🔍 DEBUG REQUEST: session_id={session_id}")
-    print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
-    print(f"🔍 DEBUG REQUEST: run_input.document_url={run_input.document_url}")
-    print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
-    print(f"🔍 DEBUG REQUEST: run_input dict={run_input.dict()}")
+    # print(f"🔍 DEBUG REQUEST: enable_hitl={enable_hitl}")
+    # print(f"🔍 DEBUG REQUEST: user_id={user_id}")
+    # print(f"🔍 DEBUG REQUEST: session_id={session_id}")
+    # print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
+    # print(f"🔍 DEBUG REQUEST: run_input.document_url={run_input.document_url}")
+    # print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
+    # print(f"🔍 DEBUG REQUEST: run_input dict={run_input.dict()}")
     
     if enable_hitl:
         # Use new HITL orchestrator
@@ -90,8 +90,10 @@ async def run_replicate_team(
             run_input=run_input
         )
         
-        # Execute HITL run in background
-        background_tasks.add_task(orchestrator.execute)
+        # Execute HITL run synchronously for debugging
+        print("🔄 About to execute HITL orchestrator...")
+        result = await orchestrator.execute()
+        # print(f"🔄 HITL orchestrator result: {result}")
         
         return {
             "run_id": orchestrator.run_id,

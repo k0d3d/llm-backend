@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLPolicy
-from .persistence import create_state_manager
 from .websocket_bridge import WebSocketHITLBridge
 from .validation import HITLValidator, create_hitl_validation_summary
 from llm_backend.core.providers.base import AIProvider, ProviderResponse
@@ -83,7 +82,8 @@ class HITLOrchestrator:
     async def _send_websocket_message(self, message: Dict[str, Any]) -> None:
         """Send HITL message via WebSocket bridge (non-blocking notification)."""
         try:
-                
+            print("📤 Preparing WebSocket HITL notification: type=hitl_approval_request")
+            
             # Extract session info from run_input
             session_id = getattr(self.run_input, 'session_id', None)
             user_id = getattr(self.run_input, 'user_id', None)
@@ -95,6 +95,7 @@ class HITLOrchestrator:
             # Configure bridge from environment
             ws_url = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
             ws_key = os.getenv("WEBSOCKET_API_KEY")
+            print(f"🔧 WebSocket config: url={ws_url}, api_key_present={bool(ws_key)}")
             bridge = WebSocketHITLBridge(websocket_url=ws_url, websocket_api_key=ws_key)
             
             # Non-blocking: directly send the approval request envelope
@@ -109,7 +110,9 @@ class HITLOrchestrator:
                     "created_at": datetime.utcnow().isoformat()
                 }
             }
+            print(f"📤 Sending WebSocket envelope to session={session_id}, user={user_id}")
             await bridge._send_websocket_message(envelope, user_id=user_id, session_id=session_id)
+            print(f"✅ WebSocket message sent successfully to session {session_id}")
             
         except Exception as e:
             print(f"❌ WebSocket notification failed: {e}")
@@ -156,8 +159,10 @@ class HITLOrchestrator:
         blocking_issues = validation_summary["blocking_issues"] > 0
         needs_review = self._should_pause_at_information_review(capabilities) or blocking_issues
         
-        
+        print(f"🤔 Needs review? {needs_review} (blocking_issues: {blocking_issues})")
+
         if needs_review:
+            print("⏸️ PAUSING for human review - sending WebSocket message")
             pause_response = self._create_pause_response(
                 step=HITLStep.INFORMATION_REVIEW,
                 message="Model capabilities and parameters require human review",
@@ -172,8 +177,10 @@ class HITLOrchestrator:
             )
             
             # Send WebSocket message for HITL approval request
+            print("🔄 About to call _send_websocket_message...")
             try:
                 await self._send_websocket_message(pause_response)
+                print("🔄 _send_websocket_message completed")
             except Exception as ws_error:
                 print(f"❌ WebSocket notification failed: {ws_error}")
             return pause_response
