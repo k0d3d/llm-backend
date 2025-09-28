@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+APP_NAME=${DOKKU_APP_NAME:-${APP:-}}
+if [[ -z "${APP_NAME}" ]]; then
+  echo "[run-migrations] DOKKU_APP_NAME not provided; skipping migrations" >&2
+  exit 0
+fi
+
+# Attempt to read DATABASE_URL from current environment first, then fall back to dokku config
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  if command -v dokku >/dev/null 2>&1; then
+    DATABASE_URL=$(dokku config:get "${APP_NAME}" DATABASE_URL || true)
+  fi
+fi
+
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  echo "[run-migrations] DATABASE_URL not set for app ${APP_NAME}; skipping migrations" >&2
+  exit 0
+fi
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_PATH="${PROJECT_ROOT}/scripts/run_migrations.sh"
+
+if [[ ! -x "${SCRIPT_PATH}" ]]; then
+  echo "[run-migrations] Migration runner not found or not executable at ${SCRIPT_PATH}" >&2
+  exit 1
+fi
+
+echo "[run-migrations] Running database migrations for ${APP_NAME}" >&2
+DATABASE_URL="${DATABASE_URL}" "${SCRIPT_PATH}"

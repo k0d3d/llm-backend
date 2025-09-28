@@ -1,0 +1,3 @@
+ALTER TABLE hitl_runs
+ADD COLUMN IF NOT EXISTS checkpoint_context JSONB,
+ADD COLUMN IF NOT EXISTS last_approval JSONB;
