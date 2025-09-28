@@ -212,7 +212,6 @@ async function resumeRun(runId: string): Promise<void> {
 
 interface EnhancedRunInput {
   prompt: string;
-  document_url?: string;
   agent_tool_config: {
     REPLICATETOOL: {
       data: {
@@ -232,6 +231,10 @@ interface EnhancedRunInput {
   };
 }
 ```
+
+Note: Do not include file/image URLs in `EnhancedRunInput`. If the selected model requires assets, the backend will attempt to auto-discover recent attachments from the user's chat history for the given `session_id`. If none are found, the HITL flow will pause with a validation checkpoint requesting the asset.
+
+> 💡 **Tip for resumable sessions**: When rendering validation cards, inspect `hitlData.context.validation_summary.blocking_issues` and `pending_actions`. If the backend pauses due to a missing attachment, surface uploader controls so reviewers can attach the required file directly from the UI.
 
 ## WebSocket Integration
 
@@ -662,6 +665,21 @@ const HITLValidationCard = ({ hitlData, isResumed = false, onApprovalComplete })
 - [ ] Timeout and expiration handling
 - [ ] Multi-user collaboration support
 - [ ] Error recovery for failed resumes
+
+## Local Testing
+
+Run the backend HITL regression suites before releasing any frontend changes that touch validation flows or session resume logic:
+
+```bash
+poetry run pytest tests/test_hitl_session_resumability.py -v
+poetry run pytest tests/test_hitl_database_integrity.py -v
+poetry run pytest tests/test_hitl_edge_cases.py -v
+
+# Aggregated report with resumability verification
+poetry run python tests/run_hitl_tests.py
+```
+
+The aggregated runner outputs a human-readable summary of each suite and confirms the database state still reflects resumability requirements—useful when validating new UI affordances for paused runs.
 
 ## React Components
 

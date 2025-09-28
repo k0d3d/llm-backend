@@ -2,7 +2,7 @@
 
 from enum import Enum
 from pydantic import BaseModel
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 class RunInput(BaseModel):
     prompt: str
@@ -12,7 +12,6 @@ class RunInput(BaseModel):
     session_id: str
     message_type: str
     log_id: Optional[str] = None
-    document_url: Optional[str] = None
     agent_tool_config: Optional[dict]
     selected_llm: Optional[dict] = None
 

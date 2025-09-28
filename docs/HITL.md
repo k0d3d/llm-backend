@@ -28,7 +28,18 @@ This document outlines the provider-agnostic Human-in-the-Loop (HITL) system tha
   - `GET /api/hitl/providers` — Available providers and mapped tools
 
 - **Orchestration**: `HITLOrchestrator` coordinates provider execution and checkpoints.
+
+## Critical Persistence Requirements
+
+For HITL runs to appear in the database, the orchestrator must follow this flow:
+
+1. **Initial State Creation**: Call `orchestrator.start_run()` to save the initial QUEUED state to the database
+2. **Checkpoint Persistence**: Use `websocket_bridge.request_human_approval()` instead of direct WebSocket sends
+3. **State Transitions**: All status changes (RUNNING → AWAITING_HUMAN → COMPLETED) are persisted via the bridge
+
+**⚠️ Important**: Direct WebSocket messaging (`_send_websocket_message`) bypasses database persistence. Always use the bridge methods (`request_human_approval`) for approval requests to ensure runs are saved to the `hitl_runs` table.
 - **Persistence**: State is managed by `create_state_manager()` and used throughout the endpoints.
+- **Session Overrides**: `HITLOrchestrator.start_run()` now merges any caller-provided `original_input` with the latest `RunInput.model_dump()` so explicit overrides like `session_id` or `user_id` persist in the initial database snapshot.
 
 ### Current Data Flow (Legacy)
 ```
@@ -39,6 +50,8 @@ RunInput → ReplicateTeam → information_agent → replicate_agent → api_int
 ```
 RunInput → HITLOrchestrator → AIProvider → HITL Checkpoints → Result
 ```
+
+The orchestrator automatically gathers attachments by probing recent session history (see `_gather_attachments()` in `llm_backend/core/hitl/orchestrator.py`). If a required asset is missing, the payload validation step surfaces a blocking issue and pauses the run for human intervention.
 
 ## Provider-Agnostic Architecture
 
@@ -56,7 +69,28 @@ The new architecture separates concerns into three layers:
 
 ### 3. API Layer
 - **Unified Endpoints**: Same API contract across all providers
-- **Backward Compatibility**: Legacy endpoints maintained during migration
+- **Backward Compatibility**: Legacy endpoints maintained
+
+## Testing & Verification
+
+The HITL stack includes a dedicated regression suite to ensure resumability, persistence, and edge-case handling remain stable:
+
+- `tests/test_hitl_session_resumability.py`
+- `tests/test_hitl_database_integrity.py`
+- `tests/test_hitl_edge_cases.py`
+
+Execute them with Poetry:
+
+```bash
+poetry run pytest tests/test_hitl_session_resumability.py -v
+poetry run pytest tests/test_hitl_database_integrity.py -v
+poetry run pytest tests/test_hitl_edge_cases.py -v
+
+# Aggregated report & database verification
+poetry run python tests/run_hitl_tests.py
+```
+
+The orchestrated runner executes all suites and performs an additional resumability validation to confirm paused runs retain session/user metadata and checkpoint context.
 
 ## Proposed HITL Checkpoints
 

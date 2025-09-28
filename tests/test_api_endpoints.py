@@ -9,7 +9,7 @@ from datetime import datetime
 
 from llm_backend.api.endpoints.hitl import router
 from llm_backend.core.hitl.types import HITLConfig, HITLStatus
-from llm_backend.core.types.common import RunInput, AgentTools
+from llm_backend.core.types.common import AgentTools
 
 
 @pytest.fixture
@@ -62,8 +62,7 @@ class TestHITLAPIEndpoints:
                 "prompt": "test prompt",
                 "agent_tool_config": {
                     AgentTools.REPLICATETOOL: {"data": {"model": "test-model"}}
-                },
-                "document_url": None
+                }
             }
             
             request_data = {
@@ -93,8 +92,7 @@ class TestHITLAPIEndpoints:
             "prompt": "test prompt",
             "agent_tool_config": {
                 "UNSUPPORTED_TOOL": {"data": {}}
-            },
-            "document_url": None
+            }
         }
         
         request_data = {

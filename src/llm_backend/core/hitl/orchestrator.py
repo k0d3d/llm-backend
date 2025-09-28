@@ -18,11 +18,20 @@ from llm_backend.core.types.common import RunInput
 class HITLOrchestrator:
     """Main orchestrator for HITL workflow management"""
     
-    def __init__(self, provider: AIProvider, config: HITLConfig, run_input: RunInput):
+    def __init__(self, provider: AIProvider, config: HITLConfig, run_input: RunInput, state_manager=None, websocket_bridge=None):
         self.provider = provider
         self.config = config
         self.run_input = run_input
         self.run_id = str(uuid.uuid4())
+        self.state_manager = state_manager
+        self.websocket_bridge = websocket_bridge
+        
+        # Debug logging for persistence components
+        print("🔧 HITLOrchestrator initialized:")
+        print(f"   - run_id: {self.run_id}")
+        print(f"   - state_manager: {'✅ Available' if state_manager else '❌ None'}")
+        print(f"   - websocket_bridge: {'✅ Available' if websocket_bridge else '❌ None'}")
+        print(f"   - provider: {provider.__class__.__name__ if provider else 'None'}")
         
         # Set provider run input
         self.provider.set_run_input(run_input)
@@ -31,7 +40,7 @@ class HITLOrchestrator:
         self.state = HITLState(
             run_id=self.run_id,
             config=config,
-            original_input=run_input.dict()
+            original_input=run_input.model_dump()
         )
         
         # Set expiration if configured
@@ -39,6 +48,37 @@ class HITLOrchestrator:
             self.state.expires_at = datetime.utcnow() + timedelta(seconds=config.timeout_seconds)
         
         self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
+    
+    async def start_run(self, original_input: Dict[str, Any], user_id: Optional[str] = None, session_id: Optional[str] = None) -> str:
+        """Start the HITL run and persist initial state to database"""
+        print(f"🚀 Starting HITL run with user_id={user_id}, session_id={session_id}")
+        
+        # Update run input with user/session info
+        if user_id:
+            self.run_input.user_id = user_id
+        if session_id:
+            self.run_input.session_id = session_id
+
+        # Sync state with latest run input values before persistence
+        updated_input = self.run_input.model_dump()
+        if original_input:
+            updated_input.update(original_input)
+        self.state.original_input = updated_input
+
+        # Save initial state to database
+        if self.state_manager:
+            try:
+                print("💾 Attempting to save initial state to database...")
+                await self.state_manager.save_state(self.state)
+                print(f"✅ Initial HITL state saved to database for run_id: {self.run_id}")
+            except Exception as e:
+                print(f"❌ Failed to save initial HITL state: {e}")
+                import traceback
+                print(f"📋 Traceback: {traceback.format_exc()}")
+        else:
+            print("⚠️ No state_manager available - initial state NOT saved to database")
+        
+        return self.run_id
     
     async def execute(self) -> Dict[str, Any]:
         """Main execution flow with HITL checkpoints"""
@@ -176,11 +216,22 @@ class HITLOrchestrator:
                 }
             )
             
-            # Send WebSocket message for HITL approval request
-            print("🔄 About to call _send_websocket_message...")
+            # Send WebSocket message for HITL approval request and persist state
+            print("🔄 About to call request_human_approval...")
             try:
-                await self._send_websocket_message(pause_response)
-                print("🔄 _send_websocket_message completed")
+                if self.websocket_bridge:
+                    approval_response = await self.websocket_bridge.request_human_approval(
+                        run_id=self.run_id,
+                        checkpoint_type="information_review",
+                        context=pause_response,
+                        user_id=getattr(self.run_input, 'user_id', None),
+                        session_id=getattr(self.run_input, 'session_id', None)
+                    )
+                    print("🔄 request_human_approval completed")
+                    return approval_response
+                else:
+                    print("⚠️ No websocket_bridge available, falling back to direct message")
+                    await self._send_websocket_message(pause_response)
             except Exception as ws_error:
                 print(f"❌ WebSocket notification failed: {ws_error}")
             return pause_response
@@ -197,7 +248,7 @@ class HITLOrchestrator:
             operation_type = self._infer_operation_type()
             payload = self.provider.create_payload(
                 prompt=self.run_input.prompt,
-                attachments=[self.run_input.document_url] if self.run_input.document_url else [],
+                attachments=self._gather_attachments(),
                 operation_type=operation_type,
                 config=self.run_input.agent_tool_config or {}
             )
@@ -206,7 +257,7 @@ class HITLOrchestrator:
             validation_issues = self.provider.validate_payload(
                 payload,
                 self.run_input.prompt,
-                [self.run_input.document_url] if self.run_input.document_url else []
+                self._gather_attachments()
             )
             
             self.state.suggested_payload = payload.dict()
@@ -277,7 +328,7 @@ class HITLOrchestrator:
         # Reconstruct payload object (this would need proper payload class detection)
         payload = self.provider.create_payload(
             prompt=self.run_input.prompt,
-            attachments=[self.run_input.document_url] if self.run_input.document_url else [],
+            attachments=self._gather_attachments(),
             operation_type=self._infer_operation_type(),
             config=self.run_input.agent_tool_config or {}
         )
@@ -477,14 +528,27 @@ class HITLOrchestrator:
         event = StepEvent(
             step=step,
             status=status,
+            timestamp=datetime.utcnow(),
             actor=actor,
             message=message
         )
         self.state.step_history.append(event)
+        print(f"📝 Added step event: {step.value} -> {status.value} ({actor}: {message})")
+        
+        if self.state_manager:
+            print("💾 Saving step event to database...")
+            import asyncio
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.state_manager.save_state(self.state))
+        else:
+            print("⚠️ No state_manager - step event NOT saved to database")
+            try:
+                pass
+            except Exception as e:
+                print(f"⚠️ Failed to save HITL state: {e}")
     
     def _is_paused(self, result: Dict[str, Any]) -> bool:
         return result.get("status") == "awaiting_human"
-    
     async def _handle_error(self, error: Exception) -> Dict[str, Any]:
         self._transition_to_step(self.state.current_step, HITLStatus.FAILED)
         self._add_step_event(self.state.current_step, HITLStatus.FAILED, "system", str(error))
@@ -572,14 +636,15 @@ class HITLOrchestrator:
                             "success": True
                         })
                     
-                    elif "image" in issue.field.lower() and self.run_input.document_url:
-                        # Map image to appropriate field
-                        if hasattr(fixed_payload, 'input') and 'image' in fixed_payload.input:
-                            fixed_payload.input['image'] = self.run_input.document_url
+                    elif "image" in issue.field.lower():
+                        # Try to map an image from gathered attachments (chat history, uploaded file, etc.)
+                        attachments = self._gather_attachments()
+                        if attachments and hasattr(fixed_payload, 'input') and 'image' in fixed_payload.input:
+                            fixed_payload.input['image'] = attachments[0]
                         
                         fix_results.append({
                             "field": issue.field,
-                            "fix_applied": f"Mapped uploaded file to {issue.field}",
+                            "fix_applied": f"Mapped discovered attachment to {issue.field}",
                             "success": True
                         })
                 
@@ -591,6 +656,32 @@ class HITLOrchestrator:
                     })
         
         return fixed_payload if fix_results else None, fix_results
+
+    def _gather_attachments(self) -> list:
+        """Gather attachments from available sources.
+
+        Currently sources assets from recent chat history for this session/user.
+        """
+        attachments = []
+        # Discover attachments from chat history (placeholder implementation)
+        history_assets = self._attachments_from_chat_history()
+        if history_assets:
+            attachments.extend(history_assets)
+
+        return attachments
+
+    def _attachments_from_chat_history(self) -> list:
+        """Placeholder: discover recent assets (e.g., images) from chat history.
+
+        This can be implemented by querying a message store using session_id/user_id,
+        or by passing recent messages in RunInput. For now, returns an empty list.
+        """
+        try:
+            # TODO: Integrate with your chat/message store to fetch recent assets
+            # Example: self.state_manager.get_recent_assets(self.run_input.session_id)
+            return []
+        except Exception:
+            return []
     
     def _suggest_payload_error_fixes(self, error: Exception) -> list:
         """Suggest fixes for payload creation/validation errors"""

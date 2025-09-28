@@ -156,6 +156,29 @@ The HITL system has been significantly enhanced with the following improvements:
 - **Enhanced Payload Review**: Improved error handling with critical issue detection
 - **Better User Feedback**: More detailed error messages and suggested actions
 - **Pause on Critical Issues**: System pauses execution when critical parameters are missing
+- **Accurate Session Persistence**: `HITLOrchestrator.start_run()` now merges caller-provided `original_input` with the latest `RunInput.model_dump()` so explicit session or user overrides are preserved when the initial state is saved.
+
+## Testing & Verification
+
+The HITL platform now ships with a comprehensive automated regression suite you can run locally or in CI.
+
+- **`tests/test_hitl_session_resumability.py`**: Verifies pause/resume flows, session isolation, database-backed step history, and attachment validation with a concrete `MockImageProvider` that mirrors image requirements.
+- **`tests/test_hitl_database_integrity.py`**: Exercises the SQL persistence layer, including schema expectations, mixed session queries, checkpoint context preservation, and resumability metadata.
+- **`tests/test_hitl_edge_cases.py`**: Covers expiry handling, concurrent updates, malformed payloads, and cleanup edge cases using async-aware fixtures so coroutine-based store operations are executed correctly.
+
+### How to run the full HITL test matrix
+
+```bash
+# Execute individual suites with poetry (recommended during development)
+poetry run pytest tests/test_hitl_session_resumability.py -v
+poetry run pytest tests/test_hitl_database_integrity.py -v
+poetry run pytest tests/test_hitl_edge_cases.py -v
+
+# Or run the orchestrated report generator
+poetry run python tests/run_hitl_tests.py
+```
+
+The standalone runner aggregates results from all three suites and performs an additional database state verification pass to ensure resumability metadata matches expectations for paused runs.
 
 ## Next Steps
 

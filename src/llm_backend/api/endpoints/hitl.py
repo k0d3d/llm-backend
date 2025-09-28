@@ -44,11 +44,23 @@ class HITLRunResponse(BaseModel):
 
 class HITLApprovalRequest(BaseModel):
     """Human approval response"""
-    approval_id: str
-    action: str = Field(..., description="approve, edit, or reject")
+    approval_id: Optional[str] = None
+    action: Optional[str] = Field(None, description="approve, edit, or reject")
     edits: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     approved_by: Optional[str] = None
+    
+    # Frontend compatibility fields
+    runId: Optional[str] = None
+    sessionId: Optional[str] = None
+    approved: Optional[bool] = None
+    
+    def model_post_init(self, __context) -> None:
+        """Auto-map frontend fields to backend fields"""
+        if self.runId and not self.approval_id:
+            self.approval_id = self.runId
+        if self.approved is not None and not self.action:
+            self.action = "approve" if self.approved else "reject"
 
 
 class HITLStatusResponse(BaseModel):
@@ -87,6 +99,9 @@ async def start_hitl_run(
         # Get provider from tool configuration
         agent_tool_config = request.run_input.agent_tool_config
         
+        # Import provider registry
+        from llm_backend.core.providers.registry import ProviderRegistry
+        
         # Determine provider based on tool
         provider_name = None
         
@@ -104,10 +119,14 @@ async def start_hitl_run(
         # Create HITL config
         hitl_config = request.hitl_config or HITLConfig()
         
+        # Get provider instance
+        provider = ProviderRegistry.get_provider(provider_name)
+        
         # Initialize orchestrator
         orchestrator = HITLOrchestrator(
-            provider_name=provider_name,
+            provider=provider,
             config=hitl_config,
+            run_input=request.run_input,
             state_manager=state_manager,
             websocket_bridge=websocket_bridge
         )
@@ -315,16 +334,19 @@ async def resume_run(
         )
         
         # Continue execution in background
+        provider_name = state.original_input.get("provider", "replicate")
+        provider = ProviderRegistry.get_provider(provider_name)
+        
         orchestrator = HITLOrchestrator(
-            provider_name=state.original_input.get("provider", "replicate"),
+            provider=provider,
             config=state.config,
+            run_input=state.original_input,
             state_manager=state_manager,
             websocket_bridge=websocket_bridge
         )
         
         background_tasks.add_task(
-            orchestrator.execute_run,
-            run_id
+            orchestrator.execute
         )
         
         return {
@@ -543,13 +565,12 @@ async def get_session_active_runs(
     """
     
     try:
-        runs = await state_manager.list_active_runs(user_id)
+        runs = await state_manager.list_active_runs(user_id, session_id)
         
-        # Filter by session_id and active statuses
+        # Filter by active statuses (session_id filtering now done in database)
         session_runs = [
             run for run in runs 
-            if run.get("session_id") == session_id 
-            and run["status"] in ["awaiting_human", "paused", "running"]
+            if run["status"] in ["awaiting_human", "paused", "running"]
         ]
         
         # Get detailed state for each run

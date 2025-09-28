@@ -94,6 +94,8 @@ class HITLState(BaseModel):
     # Human interactions
     pending_actions: List[str] = []
     approval_token: Optional[str] = None
+    checkpoint_context: Optional[Dict[str, Any]] = None
+    last_approval: Optional[Dict[str, Any]] = None
     
     # Audit trail
     step_history: List[StepEvent] = []

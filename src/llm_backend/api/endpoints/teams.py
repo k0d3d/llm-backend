@@ -43,7 +43,6 @@ async def run_replicate_team(
     # print(f"🔍 DEBUG REQUEST: user_id={user_id}")
     # print(f"🔍 DEBUG REQUEST: session_id={session_id}")
     # print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
-    # print(f"🔍 DEBUG REQUEST: run_input.document_url={run_input.document_url}")
     # print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
     # print(f"🔍 DEBUG REQUEST: run_input dict={run_input.dict()}")
     
@@ -53,12 +52,12 @@ async def run_replicate_team(
         
         # Get tool config for provider
         agent_tool_config = run_input.agent_tool_config
-        print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
-        print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: {AgentTools.REPLICATETOOL}")
-        print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
+        # print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
+        # print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: {AgentTools.REPLICATETOOL}")
+        # print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
         
         replicate_agent_tool_config = agent_tool_config.get(AgentTools.REPLICATETOOL)
-        print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
+        # print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
         
         if replicate_agent_tool_config is None:
             # Try alternative key formats
@@ -69,7 +68,7 @@ async def run_replicate_team(
                     break
         
         tool_config = replicate_agent_tool_config.get("data", {}) if replicate_agent_tool_config else {}
-        print(f"🔍 DEBUG: Final tool_config: {tool_config}")
+        # print(f"🔍 DEBUG: Final tool_config: {tool_config}")
         
         # Create provider instance
         provider = ReplicateProvider(config={
@@ -84,19 +83,36 @@ async def run_replicate_team(
             allowed_steps=["information_review", "payload_review", "response_review"]
         )
         
+        # Create state manager and websocket bridge
+        print(f"🔧 Teams endpoint (enable_hitl) creating state manager with DATABASE_URL: {DATABASE_URL[:50]}...")
+        state_manager = create_state_manager(DATABASE_URL)
+        print(f"🔧 State manager created: {type(state_manager).__name__}")
+        
+        print(f"🔧 Creating WebSocket bridge with URL: {WEBSOCKET_URL}")
+        websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
+        print(f"🔧 WebSocket bridge created: {type(websocket_bridge).__name__}")
+        
         orchestrator = HITLOrchestrator(
             provider=provider,
             config=hitl_config,
-            run_input=run_input
+            run_input=run_input,
+            state_manager=state_manager,
+            websocket_bridge=websocket_bridge
         )
         
-        # Execute HITL run synchronously for debugging
+        # Start HITL run and save initial state
+        run_id = await orchestrator.start_run(
+            original_input=run_input.dict(),
+            user_id=run_input.user_id,
+            session_id=run_input.session_id
+        )
+        
+        # Execute HITL run in background
         print("🔄 About to execute HITL orchestrator...")
-        result = await orchestrator.execute()
-        # print(f"🔄 HITL orchestrator result: {result}")
+        background_tasks.add_task(orchestrator.execute)
         
         return {
-            "run_id": orchestrator.run_id,
+            "run_id": run_id,
             "status": "queued",
             "message": "HITL run started successfully",
             "websocket_url": WEBSOCKET_URL,
@@ -137,18 +153,30 @@ async def run_replicate_team_hitl(
     config = hitl_config or HITLConfig(
         require_human_approval=True,
         checkpoint_payload_suggestion=True,
-        checkpoint_validation_review=True,
-        checkpoint_response_review=True
     )
     
+    # Create state manager and websocket bridge
+    print(f"🔧 Teams endpoint creating state manager with DATABASE_URL: {DATABASE_URL[:50]}...")
+    state_manager = create_state_manager(DATABASE_URL)
+    print(f"🔧 State manager created: {type(state_manager).__name__}")
+    
+    print(f"🔧 Creating WebSocket bridge with URL: {WEBSOCKET_URL}")
+    websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
+    print(f"🔧 WebSocket bridge created: {type(websocket_bridge).__name__}")
+    
+    from llm_backend.core.providers.registry import ProviderRegistry
+    provider = ProviderRegistry.get_provider("replicate")
+    print(f"🔧 Provider retrieved: {type(provider).__name__}")
+    
     orchestrator = HITLOrchestrator(
-        provider_name="replicate",
+        provider=provider,
         config=config,
+        run_input=run_input,
         state_manager=state_manager,
         websocket_bridge=websocket_bridge
     )
     
-    # Start HITL run
+    # Start HITL run and save initial state
     run_id = await orchestrator.start_run(
         original_input=run_input.dict(),
         user_id=user_id,
@@ -156,7 +184,7 @@ async def run_replicate_team_hitl(
     )
     
     # Execute run in background
-    background_tasks.add_task(orchestrator.execute_run, run_id)
+    background_tasks.add_task(orchestrator.execute)
     
     return {
         "run_id": run_id,

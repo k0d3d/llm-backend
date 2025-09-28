@@ -52,7 +52,7 @@ class HITLValidator:
         """Run all pre-execution validation checkpoints"""
         print(f"🔍 HITLValidator: Starting validation for model: {self.model_name}")
         print(f"📝 Prompt: {self.run_input.prompt}")
-        print(f"📎 Document URL: {self.run_input.document_url}")
+        # Note: document_url removed; attachments will be discovered by orchestrator if needed
         print(f"⚙️ Tool config: {self.tool_config}")
         
         checkpoints = []
@@ -166,24 +166,21 @@ class HITLValidator:
         
         # Check for required files
         if self._requires_file_input():
-            if not self.run_input.document_url:
-                file_type = self._get_required_file_type()
-                issues.append(ValidationIssue(
-                    field="file_input",
-                    issue=f"Required {file_type} file is missing",
-                    severity="error",
-                    suggested_fix=f"Please upload a {file_type} file",
-                    auto_fixable=False
-                ))
-            else:
-                # Validate file type and accessibility
-                file_issues = self._validate_file_accessibility()
-                issues.extend(file_issues)
+            # No explicit document_url anymore; warn and let orchestrator attempt discovery
+            # Do not block execution: orchestrator will attempt to gather attachments from chat history
+            file_type = self._get_required_file_type()
+            issues.append(ValidationIssue(
+                field="file_input",
+                issue=f"No {file_type} file explicitly provided; will attempt to discover from chat history",
+                severity="warning",
+                suggested_fix=f"Optionally attach a {file_type} file or select a recent asset from the thread",
+                auto_fixable=False
+            ))
         
         return ValidationCheckpoint(
             checkpoint_type=CheckpointType.FILE_VALIDATION,
             title="File Validation",
-            description="Verify required files are uploaded and accessible",
+            description="Verify files are available and accessible (auto-discovers recent assets if not provided)",
             required=self._requires_file_input(),
             validation_issues=issues,
             user_input_required=any(issue.severity == "error" for issue in issues)
@@ -313,38 +310,14 @@ class HITLValidator:
     def _check_parameter_conflicts(self) -> List[ValidationIssue]:
         """Check for conflicting parameters"""
         issues = []
-        
-        # Example: Check for conflicting image parameters
-        image_fields = [field for field in self.example_input.keys() 
-                       if "image" in field.lower()]
-        
-        if len(image_fields) > 1 and self.run_input.document_url:
-            # Multiple image fields but only one file uploaded
-            issues.append(ValidationIssue(
-                field="image_parameters",
-                issue=f"Model has multiple image fields ({image_fields}) but only one file uploaded",
-                severity="warning",
-                suggested_fix="Clarify which image field should use the uploaded file",
-                auto_fixable=True
-            ))
+        # Without explicit file input, we cannot determine conflicts at this stage
         
         return issues
     
     def _validate_file_accessibility(self) -> List[ValidationIssue]:
         """Validate that uploaded files are accessible"""
         issues = []
-        
-        if self.run_input.document_url:
-            # Basic URL validation
-            if not self.run_input.document_url.startswith(("http://", "https://", "data:")):
-                issues.append(ValidationIssue(
-                    field="document_url",
-                    issue="File URL appears to be invalid",
-                    severity="error",
-                    suggested_fix="Please upload a valid file",
-                    auto_fixable=False
-                ))
-        
+        # No explicit file URL is part of RunInput anymore; accessibility checks happen later when attachments are resolved
         return issues
     
     def _check_model_compatibility(self) -> List[ValidationIssue]:
@@ -354,26 +327,25 @@ class HITLValidator:
         
         # Check image models with text-only input
         if any(keyword in model_lower for keyword in ["image", "visual", "photo"]):
-            if not self.run_input.document_url and self.run_input.prompt:
-                issues.append(ValidationIssue(
-                    field="model_compatibility",
-                    issue="Image model selected but no image provided",
-                    severity="warning",
-                    suggested_fix="Upload an image file or select a text-based model",
-                    auto_fixable=False
-                ))
+            # Without explicit file, orchestrator will attempt discovery; surface as info-level guidance via warning
+            issues.append(ValidationIssue(
+                field="input_image",
+                issue="This model needs an image to work properly",
+                severity="error",
+                suggested_fix="Please upload an image file (JPG, PNG, GIF, or WebP)",
+                auto_fixable=False
+            ))
         
         # Check audio models with non-audio input
         if any(keyword in model_lower for keyword in ["whisper", "audio", "speech"]):
-            if self.run_input.document_url and not any(ext in self.run_input.document_url.lower() 
-                                                      for ext in [".mp3", ".wav", ".m4a", ".flac"]):
-                issues.append(ValidationIssue(
-                    field="model_compatibility",
-                    issue="Audio model selected but uploaded file may not be audio",
-                    severity="warning",
-                    suggested_fix="Upload an audio file (.mp3, .wav, .m4a, .flac)",
-                    auto_fixable=False
-                ))
+            # Cannot verify extension without explicit file; guidance only
+            issues.append(ValidationIssue(
+                field="input_audio",
+                issue="This model needs an audio file to work properly",
+                severity="error",
+                suggested_fix="Please upload an audio file (MP3, WAV, M4A, or FLAC)",
+                auto_fixable=False
+            ))
         
         return issues
 
@@ -384,6 +356,22 @@ def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> D
     blocking_issues = sum(len([issue for issue in cp.validation_issues if issue.severity == "error"]) 
                          for cp in checkpoints)
     
+    # Generate user-friendly message based on issues
+    user_message = "Ready to proceed"
+    if blocking_issues > 0:
+        # Check what type of files are needed
+        needs_image = any(issue.field == "input_image" for cp in checkpoints for issue in cp.validation_issues)
+        needs_audio = any(issue.field == "input_audio" for cp in checkpoints for issue in cp.validation_issues)
+        
+        if needs_image and needs_audio:
+            user_message = "This model needs both an image and audio file to work. Please upload the required files."
+        elif needs_image:
+            user_message = "This model needs an image to work. Please upload an image file."
+        elif needs_audio:
+            user_message = "This model needs an audio file to work. Please upload an audio file."
+        else:
+            user_message = "There are some issues that need your attention before we can continue."
+    
     return {
         "total_checkpoints": len(checkpoints),
         "passed_checkpoints": len([cp for cp in checkpoints if not cp.validation_issues]),
@@ -392,6 +380,7 @@ def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> D
         "total_issues": total_issues,
         "blocking_issues": blocking_issues,
         "ready_for_execution": blocking_issues == 0,
+        "user_friendly_message": user_message,
         "checkpoints": [
             {
                 "type": cp.checkpoint_type.value,
@@ -401,11 +390,14 @@ def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> D
                 "passed": len(cp.validation_issues) == 0,
                 "blocking": cp.is_blocking(),
                 "user_input_required": cp.user_input_required,
+                "checkpoint_type": cp.checkpoint_type.value,
                 "issues": [
                     {
                         "field": issue.field,
                         "issue": issue.issue,
                         "severity": issue.severity,
+                        "message": issue.issue,  # Add message field for UI compatibility
+                        "suggestion": issue.suggested_fix,  # Add suggestion field for UI compatibility
                         "suggested_fix": issue.suggested_fix,
                         "auto_fixable": issue.auto_fixable
                     }

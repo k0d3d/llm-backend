@@ -229,7 +229,7 @@ class ReplicateTeam:
             deps=InformationInputPayload(
                 example_input=self.example_input,
                 description=self.description,
-                attached_file=self.run_input.document_url
+                attached_file=None
             ),
         )
 
@@ -252,7 +252,7 @@ class ReplicateTeam:
                 example_input=self.example_input,
                 description=information.output.response_information,
                 prompt=self.prompt,
-                image_file=self.run_input.document_url,
+                image_file=None,
             ),
         )
 

@@ -6,9 +6,15 @@ This document details the design and implementation of the `HITLOrchestrator` cl
 
 The orchestrator acts as a state machine that coordinates between AI providers and human reviewers, ensuring appropriate checkpoints are enforced based on configuration and runtime conditions.
 
+Note on attachments:
+- The orchestrator no longer reads a single `document_url` field from `RunInput`. Instead, `_gather_attachments()` inspects recent chat history (and other configured sources) for the current `session_id`/`user_id` to assemble a list of candidate assets.
+- If a provider/model requires an attachment and none can be discovered, validation checkpoints surface the missing asset as a blocking issue, pausing the run until the human reviewer uploads or maps the necessary file.
+
 ## Class Structure
 
 ### HITLOrchestrator
+
+The orchestrator requires proper initialization with state management and WebSocket bridge for database persistence:
 
 ```python
 from enum import Enum
@@ -37,6 +43,15 @@ class HITLStatus(str, Enum):
     AWAITING_HUMAN = "awaiting_human"
     RUNNING = "running"
     COMPLETED = "completed"
+
+# Required constructor pattern for database persistence:
+orchestrator = HITLOrchestrator(
+    provider=provider_instance,
+    config=hitl_config,
+    run_input=run_input,
+    state_manager=state_manager,  # REQUIRED for DB persistence
+    websocket_bridge=websocket_bridge  # REQUIRED for approval flow
+)
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -105,7 +120,7 @@ class HITLOrchestrator:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
             config=config,
-            original_input=run_input.dict()
+            original_input=run_input.model_dump()
         )
         
         # Set expiration if configured
@@ -176,9 +191,10 @@ class HITLOrchestrator:
         
         # Create payload
         operation_type = self._infer_operation_type()
+        attachments = self._gather_attachments()
         payload = self.provider.create_payload(
             prompt=self.run_input.prompt,
-            attachments=[self.run_input.document_url] if self.run_input.document_url else [],
+            attachments=attachments,
             operation_type=operation_type,
             config=self.run_input.agent_tool_config or {}
         )
@@ -187,7 +203,7 @@ class HITLOrchestrator:
         validation_issues = self.provider.validate_payload(
             payload,
             self.run_input.prompt,
-            [self.run_input.document_url] if self.run_input.document_url else []
+            attachments
         )
         
         self.state.suggested_payload = payload.dict()

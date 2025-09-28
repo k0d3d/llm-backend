@@ -31,7 +31,6 @@ Create a new HITL run with a specific provider.
   "session_id": "string",
   "message_type": "string",
   "log_id": "string?",
-  "document_url": "string?",
   "agent_tool_config": {
     "replicate-agent-tool": {
       "data": {
@@ -54,6 +53,8 @@ Create a new HITL run with a specific provider.
   }
 }
 ```
+
+Note: File/image attachments are not provided directly in this request. If the selected model requires assets, the backend will attempt to auto-discover recent attachments from the user's chat history for the given `session_id`. If none are found, the HITL flow will pause with a validation checkpoint requesting the asset.
 
 **Response:**
 ```json

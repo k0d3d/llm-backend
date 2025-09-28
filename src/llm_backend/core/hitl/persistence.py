@@ -7,10 +7,10 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from urllib.parse import urlparse
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text
+from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+# Removed PostgreSQL-specific imports for SQLite compatibility
 import uuid
 
 from llm_backend.core.hitl.types import HITLState, StepEvent
@@ -22,27 +22,31 @@ class HITLRun(Base):
     """Database model for HITL runs"""
     __tablename__ = 'hitl_runs'
     
-    run_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     status = Column(String(50), nullable=False)
     current_step = Column(String(50), nullable=False)
     provider_name = Column(String(100), nullable=False)
-    original_input = Column(JSONB, nullable=False)
-    hitl_config = Column(JSONB, nullable=False)
+    session_id = Column(String(255), nullable=True, index=True)  # Critical for session-based queries
+    user_id = Column(String(255), nullable=True, index=True)     # For user-based filtering
+    original_input = Column(JSON, nullable=False)
+    hitl_config = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
     
     # Step artifacts
-    capabilities = Column(JSONB, nullable=True)
-    suggested_payload = Column(JSONB, nullable=True)
-    validation_issues = Column(JSONB, nullable=True)
-    raw_response = Column(JSONB, nullable=True)
+    capabilities = Column(JSON, nullable=True)
+    suggested_payload = Column(JSON, nullable=True)
+    validation_issues = Column(JSON, nullable=True)
+    raw_response = Column(JSON, nullable=True)
     processed_response = Column(Text, nullable=True)
     final_result = Column(Text, nullable=True)
     
     # Human interactions
-    pending_actions = Column(JSONB, nullable=True)
+    pending_actions = Column(JSON, nullable=True)
     approval_token = Column(String(255), nullable=True)
+    checkpoint_context = Column(JSON, nullable=True)
+    last_approval = Column(JSON, nullable=True)
     
     # Metrics
     total_execution_time_ms = Column(Integer, default=0)
@@ -55,13 +59,13 @@ class HITLStepEvent(Base):
     __tablename__ = 'hitl_step_events'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(UUID(as_uuid=True), nullable=False)
+    run_id = Column(String(36), nullable=False)
     step = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     actor = Column(String(255), nullable=False)
     message = Column(Text, nullable=True)
-    event_metadata = Column(JSONB, nullable=True)
+    event_metadata = Column(JSON, nullable=True)
 
 
 class HITLApproval(Base):
@@ -69,11 +73,11 @@ class HITLApproval(Base):
     __tablename__ = 'hitl_approvals'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(UUID(as_uuid=True), nullable=False)
+    run_id = Column(String(36), nullable=False)
     approval_id = Column(String(255), unique=True, nullable=False)
     checkpoint_type = Column(String(100), nullable=False)
-    context = Column(JSONB, nullable=False)
-    response = Column(JSONB, nullable=True)
+    context = Column(JSON, nullable=False)
+    response = Column(JSON, nullable=True)
     approved_by = Column(String(255), nullable=True)
     approved_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
@@ -175,8 +179,12 @@ class DatabaseStateStore(HITLStateStore):
                 existing_run.raw_response = state.raw_response
                 existing_run.processed_response = state.processed_response
                 existing_run.final_result = state.final_result
+                existing_run.session_id = state.original_input.get("session_id")
+                existing_run.user_id = state.original_input.get("user_id")
                 existing_run.pending_actions = state.pending_actions
                 existing_run.approval_token = state.approval_token
+                existing_run.checkpoint_context = state.checkpoint_context
+                existing_run.last_approval = state.last_approval
                 existing_run.total_execution_time_ms = state.total_execution_time_ms
                 existing_run.human_review_time_ms = state.human_review_time_ms
                 existing_run.provider_execution_time_ms = state.provider_execution_time_ms
@@ -187,8 +195,10 @@ class DatabaseStateStore(HITLStateStore):
                     status=state.status,
                     current_step=state.current_step,
                     provider_name=state.original_input.get("provider", "unknown"),
+                    session_id=state.original_input.get("session_id"),
+                    user_id=state.original_input.get("user_id"),
                     original_input=state.original_input,
-                    hitl_config=state.config.dict(),
+                    hitl_config=state.config.model_dump(),
                     created_at=state.created_at,
                     updated_at=state.updated_at,
                     expires_at=state.expires_at,
@@ -200,6 +210,8 @@ class DatabaseStateStore(HITLStateStore):
                     final_result=state.final_result,
                     pending_actions=state.pending_actions,
                     approval_token=state.approval_token,
+                    checkpoint_context=state.checkpoint_context,
+                    last_approval=state.last_approval,
                     total_execution_time_ms=state.total_execution_time_ms,
                     human_review_time_ms=state.human_review_time_ms,
                     provider_execution_time_ms=state.provider_execution_time_ms
@@ -233,6 +245,35 @@ class DatabaseStateStore(HITLStateStore):
             raise e
         finally:
             session.close()
+    
+    async def pause_run(self, run_id: str, checkpoint_type: str, context: Dict[str, Any]) -> None:
+        """Pause run and save checkpoint context"""
+        state = await self.load_state(run_id)
+        if state:
+            from llm_backend.core.hitl.types import HITLStatus
+            state.status = HITLStatus.AWAITING_HUMAN
+            state.updated_at = datetime.utcnow()
+            # Add checkpoint context to state
+            state.checkpoint_context = {
+                "type": checkpoint_type,
+                "context": context,
+                "paused_at": datetime.utcnow().isoformat()
+            }
+            await self.save_state(state)
+            print(f"✅ DatabaseStateStore: Paused run {run_id} at checkpoint {checkpoint_type}")
+    
+    async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> HITLState:
+        """Resume run with human approval/edits"""
+        state = await self.load_state(run_id)
+        if state:
+            from llm_backend.core.hitl.types import HITLStatus
+            state.status = HITLStatus.RUNNING
+            state.updated_at = datetime.utcnow()
+            # Store approval response
+            state.last_approval = approval_response
+            await self.save_state(state)
+            print(f"✅ DatabaseStateStore: Resumed run {run_id}")
+        return state
     
     async def load_state(self, run_id: str) -> Optional[HITLState]:
         """Load state from database"""
@@ -279,6 +320,8 @@ class DatabaseStateStore(HITLStateStore):
                 final_result=run.final_result,
                 pending_actions=run.pending_actions or [],
                 approval_token=run.approval_token,
+                checkpoint_context=run.checkpoint_context,
+                last_approval=run.last_approval,
                 step_history=step_history,
                 total_execution_time_ms=run.total_execution_time_ms,
                 human_review_time_ms=run.human_review_time_ms,
@@ -308,18 +351,21 @@ class DatabaseStateStore(HITLStateStore):
         finally:
             session.close()
     
-    async def list_active_runs(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List active runs from database"""
+    async def list_active_runs(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List active runs from database with session_id support"""
         session = self.SessionLocal()
         try:
             query = session.query(HITLRun).filter(
-                HITLRun.status.in_(["queued", "awaiting_human", "running"])
+                HITLRun.status.in_(["queued", "running", "awaiting_human", "paused"])
             )
             
-            if user_id:
-                query = query.filter(HITLRun.original_input["user_id"].astext == user_id)
+            # Session ID is more important than user ID for filtering
+            if session_id:
+                query = query.filter(HITLRun.session_id == session_id)
+            elif user_id:
+                query = query.filter(HITLRun.user_id == user_id)
             
-            runs = query.order_by(HITLRun.created_at.desc()).all()
+            runs = query.all()
             
             return [
                 {
@@ -327,6 +373,8 @@ class DatabaseStateStore(HITLStateStore):
                     "status": run.status,
                     "current_step": run.current_step,
                     "provider_name": run.provider_name,
+                    "session_id": run.session_id,
+                    "user_id": run.user_id,
                     "created_at": run.created_at.isoformat(),
                     "updated_at": run.updated_at.isoformat(),
                     "expires_at": run.expires_at.isoformat() if run.expires_at else None,
@@ -352,12 +400,18 @@ def create_state_manager(database_url: str) -> HITLStateStore:
     Returns:
         Appropriate state manager instance
     """
+    print(f"🔧 Creating state manager for URL: {database_url[:50]}...")
     parsed_url = urlparse(database_url)
+    print(f"🔧 Parsed URL scheme: {parsed_url.scheme}")
     
     if parsed_url.scheme == 'redis':
-        return RedisStateStore(database_url)
+        manager = RedisStateStore(database_url)
+        print("✅ Created RedisStateStore")
+        return manager
     elif parsed_url.scheme in ('postgresql', 'postgres'):
-        return DatabaseStateStore(database_url)
+        manager = DatabaseStateStore(database_url)
+        print("✅ Created DatabaseStateStore")
+        return manager
     elif parsed_url.scheme == 'hybrid':
         # Format: hybrid://redis_url,postgres_url
         urls = parsed_url.netloc.split(',')
@@ -365,10 +419,12 @@ def create_state_manager(database_url: str) -> HITLStateStore:
             raise ValueError("Hybrid URL must contain exactly two URLs separated by comma")
         redis_url = f"redis://{urls[0]}"
         postgres_url = f"postgresql://{urls[1]}"
-        return HybridStateManager(
+        manager = HybridStateManager(
             RedisStateStore(redis_url),
             DatabaseStateStore(postgres_url)
         )
+        print("✅ Created HybridStateManager")
+        return manager
     else:
         raise ValueError(f"Unsupported database scheme: {parsed_url.scheme}")
 
