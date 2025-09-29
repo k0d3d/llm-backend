@@ -2,28 +2,26 @@
 HITL API endpoints for human-in-the-loop workflows
 """
 
-import os
 from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from datetime import datetime
+import logging
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
 from llm_backend.core.hitl.types import HITLConfig, HITLStatus
-from llm_backend.core.hitl.persistence import create_state_manager
-from llm_backend.core.hitl.websocket_bridge import WebSocketHITLBridge
+from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
 
 router = APIRouter(prefix="/hitl", tags=["HITL"])
 
-# Initialize state management
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/tohju")
-WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
-WEBSOCKET_API_KEY = os.getenv("WEBSOCKET_API_KEY")
+# Set up logger
+logger = logging.getLogger(__name__)
 
-state_manager = create_state_manager(DATABASE_URL)
-websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
+# Get shared HITL components
+state_manager = get_shared_state_manager()
+websocket_bridge = get_shared_websocket_bridge()
 
 
 class HITLRunRequest(BaseModel):
@@ -45,6 +43,7 @@ class HITLRunResponse(BaseModel):
 class HITLApprovalRequest(BaseModel):
     """Human approval response"""
     approval_id: Optional[str] = None
+    approval_token: Optional[str] = None
     action: Optional[str] = Field(None, description="approve, edit, or reject")
     edits: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
@@ -57,8 +56,15 @@ class HITLApprovalRequest(BaseModel):
     
     def model_post_init(self, __context) -> None:
         """Auto-map frontend fields to backend fields"""
-        if self.runId and not self.approval_id:
+        # Map approval_token to approval_id if provided
+        if self.approval_token and not self.approval_id:
+            self.approval_id = self.approval_token
+        
+        # If no approval_id but we have runId, use runId as fallback
+        # This is a temporary fix - frontend should send the actual approval_id
+        if not self.approval_id and self.runId:
             self.approval_id = self.runId
+            
         if self.approved is not None and not self.action:
             self.action = "approve" if self.approved else "reject"
 
@@ -148,7 +154,7 @@ async def start_hitl_run(
             run_id=run_id,
             status="queued",
             message="HITL run started successfully",
-            websocket_url=WEBSOCKET_URL if request.session_id else None
+            websocket_url=websocket_bridge.websocket_url if request.session_id else None
         )
         
     except Exception as e:
@@ -244,6 +250,11 @@ async def approve_checkpoint(
     """
     
     try:
+        # Debug logging
+        print(f"DEBUG: Received approval request: {approval}")
+        print(f"DEBUG: approval.approval_id = {approval.approval_id}")
+        print(f"DEBUG: approval.approval_token = {approval.approval_token}")
+        
         # Process approval through WebSocket bridge
         approval_response = {
             "approval_id": approval.approval_id,
@@ -254,13 +265,40 @@ async def approve_checkpoint(
             "timestamp": datetime.utcnow().isoformat()
         }
         
+        print(f"DEBUG: approval_response = {approval_response}")
+        
         success = await websocket_bridge.handle_approval_response(approval_response)
         
         if not success:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid approval ID or approval already processed"
-            )
+            # Check if the run exists and is in a state that requires approval
+            try:
+                state = await state_manager.load_state(run_id)
+                if not state:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"HITL run {run_id} not found. Please start a HITL run first."
+                    )
+                
+                if state.status != HITLStatus.PAUSED:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Run {run_id} is not paused for approval (status: {state.status}). No approval required."
+                    )
+                
+                # If run exists and is paused but no pending approval, it may have expired
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No pending approval found for run {run_id}. The approval may have expired or already been processed."
+                )
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error checking run state: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Error validating approval request"
+                )
         
         return {
             "success": True,
@@ -586,7 +624,8 @@ async def get_session_active_runs(
                     "message": f"HITL approval required for {state.current_step}",
                     "pending_actions": state.pending_actions,
                     "expires_at": state.expires_at.isoformat() if state.expires_at else None,
-                    "validation_summary": getattr(state, 'validation_summary', None)
+                    "validation_summary": getattr(state, 'validation_summary', None),
+                    "approval_token": getattr(state, 'approval_token', None)
                 })
         
         return {

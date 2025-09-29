@@ -2,27 +2,73 @@
 HITL state persistence layer with database and Redis support
 """
 
+import uuid
 import redis
-from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+import json
+import logging
+from enum import Enum
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 from urllib.parse import urlparse
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Text, JSON
+from abc import ABC, abstractmethod
+
+from sqlalchemy import create_engine, Column, String, DateTime, JSON, Integer, Text
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-# Removed PostgreSQL-specific imports for SQLite compatibility
-import uuid
 
 from llm_backend.core.hitl.types import HITLState, StepEvent
 
 Base = declarative_base()
+logger = logging.getLogger(__name__)
+
+
+def _serialize_json(value: Any) -> Any:
+    """Recursively convert values into JSON-serializable structures."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if hasattr(value, "model_dump"):
+        return _serialize_json(value.model_dump())
+    if isinstance(value, dict):
+        return {key: _serialize_json(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_serialize_json(item) for item in value]
+    return value
+
+
+def _enum_value(value: Any) -> Any:
+    """Return `.value` for Enum instances, otherwise the value itself."""
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _uuid_value(value: Any) -> Optional[uuid.UUID]:
+    """Ensure values are stored as UUID objects when supported."""
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        return uuid.UUID(value)
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError):
+        logger.warning("Unable to coerce value to UUID", extra={"value": value})
+        return None
 
 
 class HITLRun(Base):
     """Database model for HITL runs"""
     __tablename__ = 'hitl_runs'
     
-    run_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     status = Column(String(50), nullable=False)
     current_step = Column(String(50), nullable=False)
     provider_name = Column(String(100), nullable=False)
@@ -59,13 +105,29 @@ class HITLStepEvent(Base):
     __tablename__ = 'hitl_step_events'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(36), nullable=False)
+    run_id = Column(PGUUID(as_uuid=True), nullable=False)
     step = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     actor = Column(String(255), nullable=False)
     message = Column(Text, nullable=True)
     event_metadata = Column(JSON, nullable=True)
+
+
+class HITLPendingApproval(Base):
+    """Database model for pending HITL approvals"""
+    __tablename__ = 'hitl_pending_approvals'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    approval_id = Column(String(36), unique=True, nullable=False, index=True)
+    run_id = Column(PGUUID(as_uuid=True), nullable=False, index=True)
+    checkpoint_type = Column(String(100), nullable=False)
+    context = Column(JSON, nullable=False)
+    user_id = Column(String(255), nullable=True, index=True)
+    session_id = Column(String(255), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    status = Column(String(50), default='pending', index=True)  # pending, responded, expired, cancelled
 
 
 class HITLApproval(Base):
@@ -100,6 +162,26 @@ class HITLStateStore(ABC):
     
     @abstractmethod
     async def list_active_runs(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        pass
+    
+    @abstractmethod
+    async def save_pending_approval(self, approval_data: Dict[str, Any]) -> None:
+        pass
+    
+    @abstractmethod
+    async def load_pending_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        pass
+    
+    @abstractmethod
+    async def remove_pending_approval(self, approval_id: str) -> None:
+        pass
+    
+    @abstractmethod
+    async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        pass
+    
+    @abstractmethod
+    async def cleanup_expired_approvals(self) -> int:
         pass
 
 
@@ -146,6 +228,41 @@ class RedisStateStore(HITLStateStore):
                     })
         
         return runs
+    
+    async def save_pending_approval(self, approval_data: Dict[str, Any]) -> None:
+        """Save pending approval to Redis with TTL"""
+        key = f"hitl:approval:{approval_data['approval_id']}"
+        await self.redis.setex(key, self.ttl, json.dumps(approval_data))
+    
+    async def load_pending_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        """Load pending approval from Redis"""
+        key = f"hitl:approval:{approval_id}"
+        data = await self.redis.get(key)
+        return json.loads(data) if data else None
+    
+    async def remove_pending_approval(self, approval_id: str) -> None:
+        """Remove pending approval from Redis"""
+        key = f"hitl:approval:{approval_id}"
+        await self.redis.delete(key)
+    
+    async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List pending approvals from Redis"""
+        pattern = "hitl:approval:*"
+        keys = await self.redis.keys(pattern)
+        
+        approvals = []
+        for key in keys:
+            data = await self.redis.get(key)
+            if data:
+                approval = json.loads(data)
+                if not user_id or approval.get("user_id") == user_id:
+                    approvals.append(approval)
+        
+        return approvals
+    
+    async def cleanup_expired_approvals(self) -> int:
+        """Redis handles expiration automatically"""
+        return 0  # Redis TTL handles cleanup
 
 
 class DatabaseStateStore(HITLStateStore):
@@ -165,53 +282,54 @@ class DatabaseStateStore(HITLStateStore):
         session = self.SessionLocal()
         try:
             # Check if run exists
-            existing_run = session.query(HITLRun).filter(HITLRun.run_id == state.run_id).first()
+            run_uuid = _uuid_value(state.run_id)
+            existing_run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).first()
             
             if existing_run:
                 # Update existing run
-                existing_run.status = state.status
-                existing_run.current_step = state.current_step
+                existing_run.status = _enum_value(state.status)
+                existing_run.current_step = _enum_value(state.current_step)
                 existing_run.updated_at = state.updated_at
                 existing_run.expires_at = state.expires_at
-                existing_run.capabilities = state.capabilities
-                existing_run.suggested_payload = state.suggested_payload
-                existing_run.validation_issues = state.validation_issues
-                existing_run.raw_response = state.raw_response
+                existing_run.capabilities = _serialize_json(state.capabilities)
+                existing_run.suggested_payload = _serialize_json(state.suggested_payload)
+                existing_run.validation_issues = _serialize_json(state.validation_issues)
+                existing_run.raw_response = _serialize_json(state.raw_response)
                 existing_run.processed_response = state.processed_response
-                existing_run.final_result = state.final_result
+                existing_run.final_result = _serialize_json(state.final_result)
                 existing_run.session_id = state.original_input.get("session_id")
                 existing_run.user_id = state.original_input.get("user_id")
-                existing_run.pending_actions = state.pending_actions
+                existing_run.pending_actions = _serialize_json(state.pending_actions)
                 existing_run.approval_token = state.approval_token
-                existing_run.checkpoint_context = state.checkpoint_context
-                existing_run.last_approval = state.last_approval
+                existing_run.checkpoint_context = _serialize_json(state.checkpoint_context)
+                existing_run.last_approval = _serialize_json(state.last_approval)
                 existing_run.total_execution_time_ms = state.total_execution_time_ms
                 existing_run.human_review_time_ms = state.human_review_time_ms
                 existing_run.provider_execution_time_ms = state.provider_execution_time_ms
             else:
                 # Create new run
                 new_run = HITLRun(
-                    run_id=state.run_id,
-                    status=state.status,
-                    current_step=state.current_step,
+                    run_id=run_uuid or uuid.uuid4(),
+                    status=_enum_value(state.status),
+                    current_step=_enum_value(state.current_step),
                     provider_name=state.original_input.get("provider", "unknown"),
                     session_id=state.original_input.get("session_id"),
                     user_id=state.original_input.get("user_id"),
-                    original_input=state.original_input,
-                    hitl_config=state.config.model_dump(),
+                    original_input=_serialize_json(state.original_input),
+                    hitl_config=_serialize_json(state.config),
                     created_at=state.created_at,
                     updated_at=state.updated_at,
                     expires_at=state.expires_at,
-                    capabilities=state.capabilities,
-                    suggested_payload=state.suggested_payload,
-                    validation_issues=state.validation_issues,
-                    raw_response=state.raw_response,
-                    processed_response=state.processed_response,
-                    final_result=state.final_result,
-                    pending_actions=state.pending_actions,
+                    capabilities=_serialize_json(state.capabilities),
+                    suggested_payload=_serialize_json(state.suggested_payload),
+                    validation_issues=_serialize_json(state.validation_issues),
+                    raw_response=_serialize_json(state.raw_response),
+                    processed_response=_serialize_json(state.processed_response),
+                    final_result=_serialize_json(state.final_result),
+                    pending_actions=_serialize_json(state.pending_actions),
                     approval_token=state.approval_token,
-                    checkpoint_context=state.checkpoint_context,
-                    last_approval=state.last_approval,
+                    checkpoint_context=_serialize_json(state.checkpoint_context),
+                    last_approval=_serialize_json(state.last_approval),
                     total_execution_time_ms=state.total_execution_time_ms,
                     human_review_time_ms=state.human_review_time_ms,
                     provider_execution_time_ms=state.provider_execution_time_ms
@@ -221,20 +339,20 @@ class DatabaseStateStore(HITLStateStore):
             # Save step events
             for event in state.step_history:
                 existing_event = session.query(HITLStepEvent).filter(
-                    HITLStepEvent.run_id == state.run_id,
-                    HITLStepEvent.step == event.step,
+                    HITLStepEvent.run_id == run_uuid,
+                    HITLStepEvent.step == _enum_value(event.step),
                     HITLStepEvent.timestamp == event.timestamp
                 ).first()
                 
                 if not existing_event:
                     new_event = HITLStepEvent(
-                        run_id=state.run_id,
-                        step=event.step,
-                        status=event.status,
+                        run_id=run_uuid,
+                        step=_enum_value(event.step),
+                        status=_enum_value(event.status),
                         timestamp=event.timestamp,
                         actor=event.actor,
                         message=event.message,
-                        event_metadata=event.metadata
+                        event_metadata=_serialize_json(event.metadata)
                     )
                     session.add(new_event)
             
@@ -385,6 +503,117 @@ class DatabaseStateStore(HITLStateStore):
             
         finally:
             session.close()
+    
+    async def save_pending_approval(self, approval_data: Dict[str, Any]) -> None:
+        """Save pending approval to database"""
+        session = self.SessionLocal()
+        try:
+            logger.debug("Saving pending approval", extra={
+                "approval_id": approval_data['approval_id'],
+                "run_id": approval_data['run_id'],
+                "checkpoint_type": approval_data['checkpoint_type']
+            })
+            pending_approval = HITLPendingApproval(
+                approval_id=approval_data['approval_id'],
+                run_id=_uuid_value(approval_data['run_id']),
+                checkpoint_type=approval_data['checkpoint_type'],
+                context=_serialize_json(approval_data['context']),
+                user_id=approval_data.get('user_id'),
+                session_id=approval_data.get('session_id'),
+                expires_at=datetime.fromisoformat(approval_data['expires_at'])
+            )
+            session.add(pending_approval)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to save pending approval", exc_info=e)
+            raise e
+        finally:
+            session.close()
+    
+    async def load_pending_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        """Load pending approval from database"""
+        session = self.SessionLocal()
+        try:
+            approval = session.query(HITLPendingApproval).filter(
+                HITLPendingApproval.approval_id == approval_id,
+                HITLPendingApproval.status == 'pending'
+            ).first()
+            
+            if approval:
+                return {
+                    'approval_id': approval.approval_id,
+                    'run_id': approval.run_id,
+                    'checkpoint_type': approval.checkpoint_type,
+                    'context': approval.context,
+                    'user_id': approval.user_id,
+                    'session_id': approval.session_id,
+                    'created_at': approval.created_at.isoformat(),
+                    'expires_at': approval.expires_at.isoformat()
+                }
+            return None
+        finally:
+            session.close()
+    
+    async def remove_pending_approval(self, approval_id: str) -> None:
+        """Remove pending approval from database"""
+        session = self.SessionLocal()
+        try:
+            approval = session.query(HITLPendingApproval).filter(
+                HITLPendingApproval.approval_id == approval_id
+            ).first()
+            
+            if approval:
+                approval.status = 'responded'
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+    
+    async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List pending approvals from database"""
+        session = self.SessionLocal()
+        try:
+            query = session.query(HITLPendingApproval).filter(
+                HITLPendingApproval.status == 'pending',
+                HITLPendingApproval.expires_at > datetime.utcnow()
+            )
+            
+            if user_id:
+                query = query.filter(HITLPendingApproval.user_id == user_id)
+            
+            approvals = query.all()
+            
+            return [{
+                'approval_id': approval.approval_id,
+                'run_id': approval.run_id,
+                'checkpoint_type': approval.checkpoint_type,
+                'context': approval.context,
+                'user_id': approval.user_id,
+                'session_id': approval.session_id,
+                'created_at': approval.created_at.isoformat(),
+                'expires_at': approval.expires_at.isoformat()
+            } for approval in approvals]
+        finally:
+            session.close()
+    
+    async def cleanup_expired_approvals(self) -> int:
+        """Clean up expired approvals and return count removed"""
+        session = self.SessionLocal()
+        try:
+            count = session.query(HITLPendingApproval).filter(
+                HITLPendingApproval.status == 'pending',
+                HITLPendingApproval.expires_at <= datetime.utcnow()
+            ).update({'status': 'expired'})
+            session.commit()
+            return count
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
 
 
 def create_state_manager(database_url: str) -> HITLStateStore:
@@ -464,6 +693,26 @@ class HybridStateManager:
     async def list_active_runs(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List active runs from database (source of truth)"""
         return await self.db_store.list_active_runs(user_id)
+    
+    async def save_pending_approval(self, approval_data: Dict[str, Any]) -> None:
+        """Save pending approval to database"""
+        await self.db_store.save_pending_approval(approval_data)
+    
+    async def load_pending_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        """Load pending approval from database"""
+        return await self.db_store.load_pending_approval(approval_id)
+    
+    async def remove_pending_approval(self, approval_id: str) -> None:
+        """Remove pending approval from database"""
+        await self.db_store.remove_pending_approval(approval_id)
+    
+    async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List pending approvals from database"""
+        return await self.db_store.list_pending_approvals(user_id)
+    
+    async def cleanup_expired_approvals(self) -> int:
+        """Clean up expired approvals and return count removed"""
+        return await self.db_store.cleanup_expired_approvals()
     
     async def pause_run(self, run_id: str, checkpoint_type: str, context: Dict[str, Any]) -> None:
         """Pause run and save checkpoint context"""

@@ -1,6 +1,5 @@
 
 
-import os
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Query
 
@@ -8,19 +7,14 @@ from llm_backend.agents.replicate_team import ReplicateTeam
 from llm_backend.core.types.common import AgentTools, RunInput
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
 from llm_backend.core.hitl.types import HITLConfig
-from llm_backend.core.hitl.persistence import create_state_manager
-from llm_backend.core.hitl.websocket_bridge import WebSocketHITLBridge
+from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 
 
 router = APIRouter()
 
-# Initialize HITL components for backward compatibility
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/tohju")
-WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
-WEBSOCKET_API_KEY = os.getenv("WEBSOCKET_API_KEY")
-
-state_manager = create_state_manager(DATABASE_URL)
-websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
+# Get shared HITL components
+state_manager = get_shared_state_manager()
+websocket_bridge = get_shared_websocket_bridge()
 
 
 @router.post("/run")
@@ -83,15 +77,6 @@ async def run_replicate_team(
             allowed_steps=["information_review", "payload_review", "response_review"]
         )
         
-        # Create state manager and websocket bridge
-        print(f"🔧 Teams endpoint (enable_hitl) creating state manager with DATABASE_URL: {DATABASE_URL[:50]}...")
-        state_manager = create_state_manager(DATABASE_URL)
-        print(f"🔧 State manager created: {type(state_manager).__name__}")
-        
-        print(f"🔧 Creating WebSocket bridge with URL: {WEBSOCKET_URL}")
-        websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
-        print(f"🔧 WebSocket bridge created: {type(websocket_bridge).__name__}")
-        
         orchestrator = HITLOrchestrator(
             provider=provider,
             config=hitl_config,
@@ -115,7 +100,7 @@ async def run_replicate_team(
             "run_id": run_id,
             "status": "queued",
             "message": "HITL run started successfully",
-            "websocket_url": WEBSOCKET_URL,
+            "websocket_url": websocket_bridge.websocket_url,
             "hitl_enabled": True
         }
     
@@ -155,15 +140,6 @@ async def run_replicate_team_hitl(
         checkpoint_payload_suggestion=True,
     )
     
-    # Create state manager and websocket bridge
-    print(f"🔧 Teams endpoint creating state manager with DATABASE_URL: {DATABASE_URL[:50]}...")
-    state_manager = create_state_manager(DATABASE_URL)
-    print(f"🔧 State manager created: {type(state_manager).__name__}")
-    
-    print(f"🔧 Creating WebSocket bridge with URL: {WEBSOCKET_URL}")
-    websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_manager)
-    print(f"🔧 WebSocket bridge created: {type(websocket_bridge).__name__}")
-    
     from llm_backend.core.providers.registry import ProviderRegistry
     provider = ProviderRegistry.get_provider("replicate")
     print(f"🔧 Provider retrieved: {type(provider).__name__}")
@@ -190,7 +166,7 @@ async def run_replicate_team_hitl(
         "run_id": run_id,
         "status": "queued",
         "message": "HITL run started successfully",
-        "websocket_url": WEBSOCKET_URL if session_id else None,
+        "websocket_url": websocket_bridge.websocket_url if session_id else None,
         "hitl_enabled": True,
         "config": config.dict()
     }

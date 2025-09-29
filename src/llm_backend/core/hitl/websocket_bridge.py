@@ -21,20 +21,18 @@ class WebSocketHITLBridge:
     
     def __init__(
         self,
-        websocket_url: str = "wss://ws.tohju.com",
-        websocket_api_key: str = None,
-        state_manager: HybridStateManager = None,
-        approval_timeout: int = 3600  # 1 hour default
+        websocket_url: str,
+        websocket_api_key: Optional[str] = None,
+        state_manager: Optional[HybridStateManager] = None,
+        approval_timeout: int = 300
     ):
         self.websocket_url = websocket_url
         self.websocket_api_key = websocket_api_key
         self.state_manager = state_manager
         self.approval_timeout = approval_timeout
         
-        # Track pending approvals
+        # In-memory storage for pending approvals (legacy - will be replaced by database)
         self.pending_approvals: Dict[str, Dict[str, Any]] = {}
-        
-        # Callback registry for approval responses
         self.approval_callbacks: Dict[str, Callable] = {}
     
     async def request_human_approval(
@@ -73,7 +71,11 @@ class WebSocketHITLBridge:
             "created_at": datetime.utcnow().isoformat()
         }
         
-        # Store pending approval
+        # Store pending approval in database
+        if self.state_manager:
+            await self.state_manager.save_pending_approval(approval_request)
+        
+        # Also store in memory for backward compatibility
         self.pending_approvals[approval_id] = approval_request
         
         # Pause the run in state manager
@@ -108,17 +110,46 @@ class WebSocketHITLBridge:
     
     async def handle_approval_response(self, approval_response: Dict[str, Any]) -> bool:
         """
-        Handle approval response from WebSocket
+        Handle approval response from human reviewer
         
         Args:
-            approval_response: Response from human reviewer
+            approval_response: Dict containing approval decision and metadata
             
         Returns:
             True if response was processed successfully
         """
         approval_id = approval_response.get("approval_id")
-        if not approval_id or approval_id not in self.pending_approvals:
+        
+        # Debug: Log current pending approvals
+        logger.info(f"Current pending approvals: {list(self.pending_approvals.keys())}")
+        logger.info(f"Looking for approval_id: {approval_id}")
+        
+        # First try direct approval_id lookup
+        if approval_id and approval_id in self.pending_approvals:
+            # approval_data is already loaded above
+            logger.info(f"Found approval by direct lookup: {approval_id}")
+        else:
+            # Fallback: search by run_id if approval_id not found
+            # This handles cases where frontend sends runId instead of approval_id
+            pending_approval = None
+            for stored_id, approval_data in self.pending_approvals.items():
+                logger.info(f"Checking stored approval {stored_id} with run_id: {approval_data.get('run_id')}")
+                if approval_data.get("run_id") == approval_id:
+                    pending_approval = approval_data
+                    approval_id = stored_id  # Use the actual stored approval_id
+                    logger.info(f"Found approval by run_id lookup: {stored_id}")
+        
+        # Check database first, then fallback to memory
+        approval_data = None
+        if self.state_manager:
+            approval_data = await self.state_manager.load_pending_approval(approval_id)
+        
+        if not approval_data and approval_id in self.pending_approvals:
+            approval_data = self.pending_approvals[approval_id]
+        
+        if not approval_data:
             logger.warning(f"Received response for unknown approval: {approval_id}")
+            logger.warning(f"Available approvals: {list(self.pending_approvals.keys())}")
             return False
         
         # Validate response
@@ -137,7 +168,9 @@ class WebSocketHITLBridge:
             callback = self.approval_callbacks.pop(approval_id)
             callback(approval_response)
         
-        # Clean up
+        # Clean up from both database and memory
+        if self.state_manager:
+            await self.state_manager.remove_pending_approval(approval_id)
         self.pending_approvals.pop(approval_id, None)
         
         logger.info(f"Processed approval response for {approval_id}: {approval_response['action']}")
@@ -276,6 +309,11 @@ class WebSocketHITLBridge:
     async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List pending approvals for a user"""
         
+        # Use database if available, otherwise fallback to memory
+        if self.state_manager:
+            return await self.state_manager.list_pending_approvals(user_id)
+        
+        # Legacy memory-based implementation
         approvals = []
         for approval_id, approval_data in self.pending_approvals.items():
             if not user_id or approval_data.get("user_id") == user_id:
@@ -300,7 +338,13 @@ class WebSocketHITLBridge:
     async def cancel_approval(self, approval_id: str, reason: str = "Cancelled") -> bool:
         """Cancel a pending approval"""
         
-        if approval_id not in self.pending_approvals:
+        # Check if approval exists in database or memory
+        approval_exists = False
+        if self.state_manager:
+            approval_data = await self.state_manager.load_pending_approval(approval_id)
+            approval_exists = approval_data is not None
+        
+        if not approval_exists and approval_id not in self.pending_approvals:
             return False
         
         # Trigger callback with cancellation
@@ -313,7 +357,9 @@ class WebSocketHITLBridge:
                 "timestamp": datetime.utcnow().isoformat()
             })
         
-        # Clean up
+        # Clean up from both database and memory
+        if self.state_manager:
+            await self.state_manager.remove_pending_approval(approval_id)
         self.pending_approvals.pop(approval_id, None)
         
         logger.info(f"Cancelled approval {approval_id}: {reason}")

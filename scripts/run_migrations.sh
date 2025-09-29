@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
   shift || true
-endwhile
+done
 
 if [[ -n "${MIGRATIONS_PATH_OVERRIDE}" ]]; then
   MIGRATIONS_DIR="${MIGRATIONS_PATH_OVERRIDE}"
@@ -58,7 +58,17 @@ if [[ ! -d "${MIGRATIONS_DIR}" ]]; then
 fi
 
 if [[ -z "${DATABASE_URL:-}" ]]; then
+  # Try to load from .env file if it exists
+  if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    set -a
+    source "${PROJECT_ROOT}/.env"
+    set +a
+  fi
+fi
+
+if [[ -z "${DATABASE_URL:-}" ]]; then
   echo "DATABASE_URL environment variable is required" >&2
+  echo "Set it directly or add it to .env file" >&2
   exit 1
 fi
 
