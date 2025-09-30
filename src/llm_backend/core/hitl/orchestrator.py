@@ -42,12 +42,128 @@ class HITLOrchestrator:
             config=config,
             original_input=run_input.model_dump()
         )
+
+        # Track human edits across checkpoints
+        if not hasattr(self.state, "human_edits") or self.state.human_edits is None:
+            self.state.human_edits = {}
         
         # Set expiration if configured
         if config.timeout_seconds > 0:
             self.state.expires_at = datetime.utcnow() + timedelta(seconds=config.timeout_seconds)
         
         self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
+    
+    def _collect_hitl_edits(self) -> Optional[Dict[str, Any]]:
+        """Collect all human edits from state"""
+        # Check multiple sources for human edits
+        human_edits = {}
+        
+        # Source 1: Direct state.human_edits
+        if hasattr(self.state, 'human_edits') and self.state.human_edits:
+            human_edits.update(self.state.human_edits)
+            print(f"🔍 Found human edits in state.human_edits: {self.state.human_edits}")
+        
+        # Source 2: Last approval response
+        if hasattr(self.state, 'last_approval') and self.state.last_approval and self.state.last_approval.get('edits'):
+            approval_edits = self.state.last_approval['edits']
+            human_edits.update(approval_edits)
+            print(f"🔍 Found human edits in last_approval: {approval_edits}")
+        
+        # Source 3: Suggested payload for backward compatibility
+        if not human_edits and hasattr(self.state, 'suggested_payload') and isinstance(self.state.suggested_payload, dict):
+            suggested = self.state.suggested_payload
+            # Check top-level fields first
+            for field in ["input_image", "source_image", "driven_audio", "audio_file"]:
+                if field in suggested:
+                    human_edits[field] = suggested[field]
+                    print(f"🔍 Found human edit in suggested_payload top-level: {field} = {suggested[field]}")
+            
+            # Then check nested input
+            if 'input' in suggested and isinstance(suggested['input'], dict):
+                for field in ["input_image", "source_image", "driven_audio", "audio_file", "image"]:
+                    if field in suggested['input']:
+                        # Map back to original field name for consistency
+                        if field == "image":
+                            human_edits["input_image"] = suggested['input'][field]
+                            print(f"🔍 Found human edit in suggested_payload.input: image -> input_image = {suggested['input'][field]}")
+                        else:
+                            human_edits[field] = suggested['input'][field]
+                            print(f"🔍 Found human edit in suggested_payload.input: {field} = {suggested['input'][field]}")
+        
+        if not human_edits:
+            print(f"🔍 No human edits found anywhere. state.human_edits: {getattr(self.state, 'human_edits', 'MISSING')}, last_approval: {getattr(self.state, 'last_approval', 'MISSING')}")
+            return None
+        
+        print(f"🔍 Collected human edits: {human_edits}")
+        return human_edits
+
+    def _apply_approval_response(self, approval_response: Optional[Dict[str, Any]], step: Optional[HITLStep] = None) -> None:
+        """Persist approval details and merge edits into orchestrator state."""
+        if not approval_response:
+            return
+
+        print(f"🔄 Applying approval response: {approval_response.get('action')} for step {step}")
+
+        # Preserve raw approval for downstream consumers
+        self.state.last_approval = approval_response
+
+        edits = approval_response.get("edits") or {}
+        if not hasattr(self.state, "human_edits") or self.state.human_edits is None:
+            self.state.human_edits = {}
+
+        for field, value in edits.items():
+            self.state.human_edits[field] = value
+            print(f"🧩 Stored human edit from approval: {field} = {value}")
+
+            if field == "prompt":
+                self.run_input.prompt = value
+            elif field == "model_config" and isinstance(value, dict):
+                if self.run_input.agent_tool_config is None:
+                    self.run_input.agent_tool_config = {}
+                self.run_input.agent_tool_config.update(value)
+
+        if step:
+            self.state.current_step = step
+
+        # Clear pending actions and resume execution state
+        self.state.pending_actions = []
+        self.state.status = HITLStatus.RUNNING
+        self.state.updated_at = datetime.utcnow()
+
+        # Persist updated state asynchronously if a manager is available
+        if self.state_manager:
+            import asyncio
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.state_manager.save_state(self.state))
+                else:
+                    loop.run_until_complete(self.state_manager.save_state(self.state))
+            except RuntimeError:
+                # get_event_loop may fail outside async context; fall back to direct call
+                asyncio.run(self.state_manager.save_state(self.state))
+
+    def _merge_payload_edits(self, payload_dict: Dict[str, Any], hitl_edits: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge HITL edits into payload dictionary"""
+        merged = payload_dict.copy()
+
+        # Ensure input section exists
+        if 'input' not in merged:
+            merged['input'] = {}
+        
+        # Apply edits with smart field mapping
+        for key, value in hitl_edits.items():
+            # Map common field aliases
+            if key in ["input_image", "source_image"] and "image" in merged['input']:
+                merged['input']['image'] = value
+            elif key in merged['input']:
+                merged['input'][key] = value
+            else:
+                # Store as-is if no mapping found
+                merged['input'][key] = value
+        
+        return merged
     
     async def start_run(self, original_input: Dict[str, Any], user_id: Optional[str] = None, session_id: Optional[str] = None) -> str:
         """Start the HITL run and persist initial state to database"""
@@ -228,7 +344,21 @@ class HITLOrchestrator:
                         session_id=getattr(self.run_input, 'session_id', None)
                     )
                     print("🔄 request_human_approval completed")
-                    return approval_response
+                    self._apply_approval_response(approval_response, HITLStep.INFORMATION_REVIEW)
+
+                    actor = approval_response.get("approved_by")
+                    if actor is None or actor == "":
+                        actor_label = "human"
+                    else:
+                        actor_label = f"human:{actor}"
+
+                    self._add_step_event(
+                        HITLStep.INFORMATION_REVIEW,
+                        HITLStatus.COMPLETED,
+                        actor_label,
+                        f"Human action: {approval_response.get('action', 'unknown')}"
+                    )
+                    return {"continue": True, "approval": approval_response}
                 else:
                     print("⚠️ No websocket_bridge available, falling back to direct message")
                     await self._send_websocket_message(pause_response)
@@ -246,11 +376,13 @@ class HITLOrchestrator:
         try:
             # Create payload
             operation_type = self._infer_operation_type()
+            hitl_edits = self._collect_hitl_edits()
             payload = self.provider.create_payload(
                 prompt=self.run_input.prompt,
                 attachments=self._gather_attachments(),
                 operation_type=operation_type,
-                config=self.run_input.agent_tool_config or {}
+                config=self.run_input.agent_tool_config or {},
+                hitl_edits=hitl_edits or None
             )
             
             # Validate payload with enhanced validation
@@ -260,7 +392,10 @@ class HITLOrchestrator:
                 self._gather_attachments()
             )
             
-            self.state.suggested_payload = payload.dict()
+            payload_dict = payload.dict()
+            if hitl_edits:
+                payload_dict = self._merge_payload_edits(payload_dict, hitl_edits)
+            self.state.suggested_payload = payload_dict
             self.state.validation_issues = [issue.dict() for issue in validation_issues]
             
             # Check for critical validation failures that require human intervention
@@ -325,13 +460,21 @@ class HITLOrchestrator:
         self._transition_to_step(HITLStep.API_CALL, HITLStatus.RUNNING)
         
         # Get payload from previous step or state
-        # Reconstruct payload object (this would need proper payload class detection)
+        # Create base payload with HITL edits integration
+        hitl_edits = self._collect_hitl_edits()
+        if hitl_edits:
+            print(f"🎯 Passing HITL edits to provider: {hitl_edits}")
+        
         payload = self.provider.create_payload(
             prompt=self.run_input.prompt,
             attachments=self._gather_attachments(),
             operation_type=self._infer_operation_type(),
-            config=self.run_input.agent_tool_config or {}
+            config=self.run_input.agent_tool_config or {},
+            hitl_edits=hitl_edits or None
         )
+        
+        # Note: HITL edits are now handled by the intelligent agent in create_payload()
+        # This eliminates the need for manual field mapping and override logic
         
         # Execute with provider
         start_time = time.time()
@@ -416,16 +559,76 @@ class HITLOrchestrator:
                 self.run_input.prompt = edits["prompt"]
             if "model_config" in edits:
                 self.run_input.agent_tool_config.update(edits["model_config"])
+            
+            # Store human edits in state for persistence across steps
+            for field, value in edits.items():
+                if field in ["input_image", "source_image", "driven_audio", "audio_file"]:
+                    self.state.human_edits[field] = value
+                    print(f"🧩 Stored human edit: {field} = {value}")
+            
+            # Also update suggested_payload for backward compatibility
+            file_fields = ["input_image", "source_image", "driven_audio", "audio_file"]
+            field_aliases = {
+                "input_image": ["image", "input_image", "source_image"],
+                "source_image": ["image", "source_image", "input_image"],
+                "driven_audio": ["audio", "driven_audio", "audio_file"],
+                "audio_file": ["audio", "audio_file", "driven_audio"],
+            }
+
+            for field in file_fields:
+                if field in edits:
+                    if not hasattr(self.state, 'suggested_payload') or self.state.suggested_payload is None:
+                        self.state.suggested_payload = {}
+
+                    # Store raw edit for reference
+                    self.state.suggested_payload[field] = edits[field]
+
+                    # Ensure nested input payload exists
+                    if "input" not in self.state.suggested_payload or not isinstance(self.state.suggested_payload["input"], dict):
+                        self.state.suggested_payload["input"] = {}
+
+                    input_payload = self.state.suggested_payload["input"]
+                    aliases = field_aliases.get(field, [field])
+                    updated = False
+
+                    # Prefer updating existing alias keys
+                    for alias in aliases:
+                        if alias in input_payload:
+                            input_payload[alias] = edits[field]
+                            updated = True
+
+                    # If no existing alias present, set the first alias as default
+                    if not updated and aliases:
+                        primary_alias = aliases[0]
+                        input_payload[primary_alias] = edits[field]
+
+                    print(
+                        f"🧩 Applied file edit '{field}' -> aliases {aliases}"
+                        f" (set value: {edits[field]})"
+                    )
         
         elif self.state.current_step == HITLStep.PAYLOAD_REVIEW:
             if "payload" in edits:
                 self.state.suggested_payload.update(edits["payload"])
+            else:
+                # Apply individual field edits directly to suggested_payload
+                if not hasattr(self.state, 'suggested_payload') or self.state.suggested_payload is None:
+                    self.state.suggested_payload = {}
+                self.state.suggested_payload.update(edits)
         
         elif self.state.current_step == HITLStep.RESPONSE_REVIEW:
             if "response" in edits:
                 self.state.final_result = edits["response"]
         
         self._add_step_event(self.state.current_step, HITLStatus.COMPLETED, actor, f"Edited: {message}")
+        
+        # Save state after applying edits
+        if self.state_manager:
+            try:
+                await self.state_manager.save_state(self.state)
+                print("💾 Saved state after applying edits")
+            except Exception as e:
+                print(f"❌ Failed to save state after edits: {e}")
         
         # Continue execution
         return await self.execute()
@@ -520,6 +723,7 @@ class HITLOrchestrator:
         return response
     
     def _transition_to_step(self, step: HITLStep, status: HITLStatus = HITLStatus.RUNNING):
+        """Transition to a new step"""
         self.state.current_step = step
         self.state.status = status
         self.state.updated_at = datetime.utcnow()

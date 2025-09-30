@@ -180,23 +180,44 @@ class ReplicateTeam:
             output_type=AgentPayload,
             system_prompt=(
                 """
-            Analyze the example_input. It contains properties that are used to run a model on replicate.com.
-            Based on the prompt, create a json payload based on the example_input schema to send a request.
-            The exact prompt string must be the part of the final payload.
-            Check for properties like input, prompt, text in the example_input schema to replace.
-            Check for properties like
-            image, image_file, image_url, input_image, first_frame_image, subject_reference, start_image
-            in the example_input schema
-            and replace it when attached image is provided.
-            The final input should be a json payload based on the example_input schema to send a request.
-            Also provide the operationType value based on the description of the models capabilities.
-            Do not make up properties that are not in example_input.
-            DO NOT wrap suggested input in a parent object
-            DO NOT make up the input object. Rewrite example_input and use its schema.
-            Check if the payload contains the prompt string.
-            if an image file is provided, check if the payload contains the image file as
-            either image, image_file, image_url, input_image, first_frame_image, subject_reference, start_image
-            or a similar property.
+            You are an intelligent field mapping agent for Replicate models. Your job is to create optimal payloads by understanding model schemas and user intent.
+            
+            CORE RESPONSIBILITIES:
+            1. Analyze the example_input schema to understand field relationships and priorities
+            2. Map user inputs (prompt, attachments, HITL edits) to the correct model fields
+            3. Create a valid JSON payload that follows the example_input schema exactly
+            4. Handle semantic field mapping (e.g., input_image → image for background removal models)
+            
+            INTELLIGENT FIELD MAPPING RULES:
+            - For TEXT fields: Map prompt to the most appropriate field (prompt > text > input > instruction)
+            - For IMAGE fields: Prioritize based on model purpose:
+              * Background removal models: input_image/source_image → image
+              * Image generation: prompt → prompt, reference images → image/input_image
+              * Image editing: source → image/input_image, instructions → prompt
+            - For AUDIO fields: Map to audio/file/input based on schema
+            
+            HITL EDIT INTEGRATION:
+            - When HITL edits are provided (e.g., {"input_image": "url", "source_image": "url"}), intelligently map them:
+              * If example_input has "image" but edits have "input_image", map input_image → image
+              * If example_input has both, use the most specific field for the model type
+              * Preserve user intent while respecting model schema
+            
+            SCHEMA ANALYSIS:
+            - Identify primary vs secondary fields (image vs image_url)
+            - Understand field purposes from names and model description
+            - Detect required vs optional parameters
+            
+            OUTPUT REQUIREMENTS:
+            - Return exact example_input structure with mapped values
+            - Include operationType based on model description analysis
+            - Ensure all user inputs are represented in the final payload
+            - DO NOT create fields not in example_input
+            - DO NOT wrap in parent objects
+            
+            VALIDATION:
+            - Verify prompt appears in final payload if provided
+            - Verify image files appear in appropriate fields if provided
+            - Ensure HITL edits are properly integrated
           """
             ),
             tools=[Tool(check_payload_for_prompt, takes_ctx=True, max_retries=5, description="Check if the payload contains the prompt string and image file.")],
@@ -217,6 +238,12 @@ class ReplicateTeam:
         @replicate_agent.system_prompt
         def get_image_file(ctx: RunContext[ExampleInput]):
             return f"Image file url: {ctx.deps.image_file}"
+        
+        @replicate_agent.system_prompt
+        def get_hitl_edits(ctx: RunContext[ExampleInput]):
+            if ctx.deps.hitl_edits:
+                return f"HITL Human Edits (integrate these into the payload): {ctx.deps.hitl_edits}"
+            return "No HITL edits provided."
 
 
         return replicate_agent

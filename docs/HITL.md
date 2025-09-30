@@ -237,39 +237,106 @@ Enhance `ModelRetry` handling:
 
 ## Data Model and Persistence
 
-### Run Entity
+### Hybrid PostgreSQL + JSONB Architecture
+
+The HITL system now uses a hybrid approach combining relational columns with JSONB document storage for maximum flexibility:
+
+#### HITLRun Model
 ```python
-class Run:
-    run_id: str
-    status: RunStatus
-    current_step: RunStep
+class HITLRun:
+    # Relational columns for indexing and queries
+    run_id: UUID (primary key)
+    status: str (indexed)
+    current_step: str
+    provider_name: str
+    session_id: str (indexed)
+    user_id: str (indexed)
     created_at: datetime
     updated_at: datetime
-    expires_at: Optional[datetime]
+    expires_at: datetime
     
-    # Input data
-    original_input: RunInput
-    tool_config: Dict
+    # JSON columns for structured data
+    original_input: JSON
+    hitl_config: JSON
+    capabilities: JSON
+    suggested_payload: JSON
+    validation_issues: JSON
+    raw_response: JSON
+    processed_response: Text
+    final_result: Text
+    pending_actions: JSON
+    approval_token: str
+    checkpoint_context: JSON
+    last_approval: JSON
     
-    # Step artifacts
-    information_result: Optional[InformationInputResponse]
-    suggested_payload: Optional[AgentPayload]
-    api_response: Optional[str]
-    final_result: Optional[str]
+    # Metrics
+    total_execution_time_ms: int
+    human_review_time_ms: int
+    provider_execution_time_ms: int
     
-    # Human interactions
-    approvals: List[Approval]
-    edits: List[Edit]
-    feedback: Optional[Feedback]
-    
-    # Audit trail
-    step_history: List[StepEvent]
+    # JSONB document snapshot (NEW)
+    state_snapshot: JSONB  # Complete HITLState as document
 ```
 
+#### JSONB Indexes for Performance
+```sql
+-- Status queries
+CREATE INDEX hitl_runs_state_status_idx ON hitl_runs USING GIN ((state_snapshot->>'status'));
+
+-- Checkpoint type queries  
+CREATE INDEX hitl_runs_checkpoint_type_idx ON hitl_runs USING GIN ((state_snapshot->'checkpoint_context'->>'type'));
+
+-- Pending actions queries
+CREATE INDEX hitl_runs_pending_actions_idx ON hitl_runs USING GIN ((state_snapshot->'pending_actions'));
+
+-- Validation issues queries
+CREATE INDEX hitl_runs_validation_issues_idx ON hitl_runs USING GIN ((state_snapshot->'validation_issues'));
+
+-- General JSONB queries
+CREATE INDEX hitl_runs_state_snapshot_gin_idx ON hitl_runs USING GIN (state_snapshot);
+```
+
+#### Document-Style Query Methods
+```python
+# Query runs by checkpoint type
+runs = await db_store.query_runs_by_checkpoint_type("payload_review", user_id="user123")
+
+# Query runs with validation issues
+runs = await db_store.query_runs_with_validation_issues(severity="error")
+
+# Query runs with specific pending actions
+runs = await db_store.query_runs_by_pending_action("approve")
+
+# Get analytics using JSONB aggregations
+analytics = await db_store.get_run_analytics()
+```
+
+### Benefits of Hybrid JSONB Approach
+
+#### Advantages
+- **Backward Compatibility**: Existing relational queries continue to work
+- **Document Flexibility**: Complex nested data stored naturally in JSONB
+- **Query Performance**: GIN indexes enable fast JSONB path queries
+- **Analytics**: Native PostgreSQL aggregations on JSON data
+- **Migration Safety**: Gradual transition without breaking existing code
+
+#### Use Cases
+- **Complex Validation Rules**: Store validation checkpoints as nested JSON
+- **Dynamic Metadata**: Checkpoint context varies by provider/model
+- **Audit Trails**: Complete state snapshots for debugging
+- **Analytics**: Aggregate metrics across different checkpoint types
+
+### Migration Strategy
+1. **Phase 1**: Add `state_snapshot` JSONB column (✅ Completed)
+2. **Phase 2**: Populate JSONB alongside existing columns (✅ Completed)  
+3. **Phase 3**: Create GIN indexes for performance (✅ Completed)
+4. **Phase 4**: Add document-style query methods (✅ Completed)
+5. **Phase 5**: Gradually migrate queries to use JSONB where beneficial
+
 ### Versioning Strategy
-- Keep snapshots of `example_input`, `tool_config`, and `AgentPayload` per gate
-- Store diffs to enable "undo" and provenance tracking
-- Version all human edits with timestamps and actor information
+- Complete `HITLState` snapshots stored in `state_snapshot` JSONB column
+- Relational columns maintained for backward compatibility and indexing
+- Version all human edits with timestamps and actor information in JSON
 
 ## Validation and Guidance
 

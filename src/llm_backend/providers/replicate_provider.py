@@ -4,7 +4,7 @@ Replicate provider implementation wrapping existing ReplicateTeam logic
 
 import time
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from llm_backend.core.providers.base import (
     AIProvider, ProviderPayload, ProviderResponse, 
@@ -47,9 +47,94 @@ class ReplicateProvider(AIProvider):
             cost_per_request=0.01  # Estimate
         )
     
-    def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict) -> ReplicatePayload:
-        """Create Replicate-specific payload from generic inputs"""
-        input_data = self.example_input.copy()
+    def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
+        """Create Replicate-specific payload using intelligent agent-based field mapping"""
+        from llm_backend.agents.replicate_team import ReplicateTeam
+        from llm_backend.core.types.replicate import ExampleInput
+        import asyncio
+        
+        if self.run_input is None:
+            raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
+
+        replicate_team = ReplicateTeam(
+            prompt=prompt,
+            tool_config={
+                "example_input": self.example_input,
+                "description": self.description,
+                "latest_version": self.latest_version,
+                "model_name": self.model_name
+            },
+            run_input=self.run_input,
+            hitl_enabled=True  # Enable intelligent mapping
+        )
+        
+        # Prepare agent input with HITL edits
+        agent_input = ExampleInput(
+            prompt=prompt,
+            example_input=self.example_input,
+            description=self.description,
+            image_file=attachments[0] if attachments else None,
+            hitl_edits=hitl_edits  # Pass HITL edits for intelligent integration
+        )
+        
+        # Use AI agent as primary logic for intelligent payload creation
+        try:
+            replicate_agent = replicate_team.replicate_agent()
+
+            async def run_agent() -> Any:
+                print(f"🔍 Agent deps: {agent_input.model_dump()}")
+                return await replicate_agent.run(
+                    "Generate an optimal Replicate payload using the provided inputs.",
+                    deps=agent_input,
+                )
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(lambda: asyncio.run(run_agent()))
+                    agent_payload = future.result()
+            else:
+                agent_payload = asyncio.run(run_agent())
+
+            agent_output = getattr(agent_payload, "output", None)
+            if agent_output is None:
+                raise ValueError("Agent did not return an output payload")
+
+            agent_input_payload = agent_output.input.model_dump()
+
+            if hitl_edits:
+                agent_input_payload = self._apply_hitl_edits(agent_input_payload, hitl_edits)
+
+            print(f"🤖 Agent created payload: {agent_input_payload}")
+
+            metadata = {
+                "original_example": self.example_input,
+                "agent_generated": True,
+                "agent_messages": getattr(agent_payload, "messages", None),
+                "hitl_applied": bool(hitl_edits)
+            }
+
+            return ReplicatePayload(
+                provider_name="replicate",
+                input=agent_input_payload,
+                operation_type=operation_type,
+                model_version=self.latest_version,
+                metadata=metadata
+            )
+
+        except Exception as e:
+            print(f"⚠️ Agent payload creation failed: {e}")
+            print(f"🔍 Agent input details: prompt='{prompt}', hitl_edits={hitl_edits}, example_input={self.example_input}")
+            import traceback
+            print(f"🔍 Full traceback: {traceback.format_exc()}")
+            print("🔧 Falling back to static mapping")
+
+        print(f"🔧 Using enhanced fallback mapping with HITL edits: {hitl_edits}")
+
+        # Fallback to static mapping if agent fails
+        input_data = self._apply_hitl_edits(self.example_input.copy(), hitl_edits)
         
         # Map prompt to appropriate field
         prompt_fields = ["prompt", "text", "input", "query", "instruction"]
@@ -58,8 +143,8 @@ class ReplicateProvider(AIProvider):
                 input_data[field] = prompt
                 break
         
-        # Map attachments to appropriate fields
-        if attachments:
+        # Map attachments to appropriate fields (only if no HITL edits provided)
+        if attachments and not hitl_edits:
             image_fields = [
                 "image", "image_url", "input_image", "first_frame_image", 
                 "subject_reference", "start_image", "init_image"
@@ -74,8 +159,44 @@ class ReplicateProvider(AIProvider):
             input=input_data,
             operation_type=operation_type,
             model_version=self.latest_version,
-            metadata={"original_example": self.example_input}
+            metadata={"original_example": self.example_input, "fallback_used": True, "hitl_mapped": bool(hitl_edits)}
         )
+
+    def _apply_hitl_edits(self, base_input: Dict[str, Any], hitl_edits: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply human edits onto a payload input dict with smart alias handling."""
+        if not hitl_edits:
+            return base_input
+
+        updated_input = base_input.copy()
+
+        alias_map = {
+            "input_image": ["input_image", "source_image", "image", "image_url"],
+            "source_image": ["source_image", "input_image", "image", "image_url"],
+            "image": ["image", "input_image", "source_image", "image_url"],
+            "driven_audio": ["driven_audio", "audio_file", "audio"],
+            "audio_file": ["audio_file", "driven_audio", "audio"],
+            "prompt": ["prompt", "text", "instruction", "input"],
+        }
+
+        for key, value in hitl_edits.items():
+            if value in (None, ""):
+                continue
+
+            targets = alias_map.get(key, [key])
+            applied = False
+
+            for target in targets:
+                if target in updated_input:
+                    updated_input[target] = value
+                    applied = True
+
+            if not applied:
+                primary_target = targets[0]
+                updated_input[primary_target] = value
+
+            print(f"🔧 Applied HITL overlay: {key} -> {value}")
+
+        return updated_input
     
     def validate_payload(self, payload: ReplicatePayload, prompt: str, attachments: List[str]) -> List[ValidationIssue]:
         """Enhanced validation with HITL parameter detection"""

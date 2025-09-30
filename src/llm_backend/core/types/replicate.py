@@ -34,6 +34,7 @@ class ExampleInput(BaseModel):
     props: Optional[Props] = None
     image_file: Optional[str] = None
     video_file: Optional[str] = None
+    hitl_edits: Optional[Dict] = None  # HITL human edits to integrate
 
 class InformationInputResponse(BaseModel):
     continue_run: bool

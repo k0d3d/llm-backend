@@ -23,6 +23,12 @@ CREATE INDEX IF NOT EXISTS idx_hitl_pending_approvals_session_id ON hitl_pending
 CREATE INDEX IF NOT EXISTS idx_hitl_pending_approvals_user_id ON hitl_pending_approvals(user_id);
 
 -- Add foreign key constraint to link with hitl_runs
-ALTER TABLE hitl_pending_approvals 
-ADD CONSTRAINT fk_hitl_pending_approvals_run_id 
-FOREIGN KEY (run_id) REFERENCES hitl_runs(run_id) ON DELETE CASCADE;
+DO $$
+BEGIN
+    ALTER TABLE hitl_pending_approvals 
+    ADD CONSTRAINT fk_hitl_pending_approvals_run_id 
+    FOREIGN KEY (run_id) REFERENCES hitl_runs(run_id) ON DELETE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN
+        NULL; -- Constraint already exists
+END $$;

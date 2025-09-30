@@ -12,8 +12,19 @@ from datetime import datetime
 from urllib.parse import urlparse
 from abc import ABC, abstractmethod
 
-from sqlalchemy import create_engine, Column, String, DateTime, JSON, Integer, Text
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy import (
+    create_engine,
+    Column,
+    String,
+    DateTime,
+    JSON,
+    Integer,
+    Enum,
+    ForeignKey,
+    Text,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -93,11 +104,15 @@ class HITLRun(Base):
     approval_token = Column(String(255), nullable=True)
     checkpoint_context = Column(JSON, nullable=True)
     last_approval = Column(JSON, nullable=True)
+    human_edits = Column(JSON, nullable=True, default=dict)  # Store persistent human edits
     
     # Metrics
     total_execution_time_ms = Column(Integer, default=0)
     human_review_time_ms = Column(Integer, default=0)
     provider_execution_time_ms = Column(Integer, default=0)
+    
+    # JSONB document snapshot for hybrid document/relational approach
+    state_snapshot = Column(JSONB, nullable=True)
 
 
 class HITLStepEvent(Base):
@@ -276,6 +291,48 @@ class DatabaseStateStore(HITLStateStore):
         self.engine = create_engine(database_url)
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        
+        # Create JSONB indexes for efficient document queries
+        self._create_jsonb_indexes()
+    
+    def _create_jsonb_indexes(self):
+        """Create GIN indexes for JSONB queries on state_snapshot"""
+        try:
+            with self.engine.connect() as conn:
+                # Index for status queries
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS hitl_runs_state_status_idx 
+                    ON hitl_runs ((state_snapshot->>'status'))
+                """))
+
+                # Index for checkpoint type queries
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS hitl_runs_checkpoint_type_idx 
+                    ON hitl_runs ((state_snapshot->'checkpoint_context'->>'type'))
+                """))
+
+                # Index for pending actions
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS hitl_runs_pending_actions_idx 
+                    ON hitl_runs USING GIN ((state_snapshot->'pending_actions'))
+                """))
+
+                # Index for validation issues
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS hitl_runs_validation_issues_idx 
+                    ON hitl_runs USING GIN ((state_snapshot->'validation_issues'))
+                """))
+
+                # General JSONB index for complex queries
+                conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS hitl_runs_state_snapshot_gin_idx 
+                    ON hitl_runs USING GIN (state_snapshot)
+                """))
+                
+                conn.commit()
+                logger.info("JSONB indexes created successfully")
+        except Exception as e:
+            logger.warning(f"Failed to create JSONB indexes: {e}")
     
     async def save_state(self, state: HITLState) -> None:
         """Save state to database"""
@@ -303,9 +360,12 @@ class DatabaseStateStore(HITLStateStore):
                 existing_run.approval_token = state.approval_token
                 existing_run.checkpoint_context = _serialize_json(state.checkpoint_context)
                 existing_run.last_approval = _serialize_json(state.last_approval)
+                existing_run.human_edits = _serialize_json(state.human_edits)
                 existing_run.total_execution_time_ms = state.total_execution_time_ms
                 existing_run.human_review_time_ms = state.human_review_time_ms
                 existing_run.provider_execution_time_ms = state.provider_execution_time_ms
+                # Store complete state as JSONB document
+                existing_run.state_snapshot = _serialize_json(state.model_dump())
             else:
                 # Create new run
                 new_run = HITLRun(
@@ -330,9 +390,12 @@ class DatabaseStateStore(HITLStateStore):
                     approval_token=state.approval_token,
                     checkpoint_context=_serialize_json(state.checkpoint_context),
                     last_approval=_serialize_json(state.last_approval),
+                    human_edits=_serialize_json(state.human_edits),
                     total_execution_time_ms=state.total_execution_time_ms,
                     human_review_time_ms=state.human_review_time_ms,
-                    provider_execution_time_ms=state.provider_execution_time_ms
+                    provider_execution_time_ms=state.provider_execution_time_ms,
+                    # Store complete state as JSONB document
+                    state_snapshot=_serialize_json(state.model_dump())
                 )
                 session.add(new_run)
             
@@ -389,6 +452,16 @@ class DatabaseStateStore(HITLStateStore):
             state.updated_at = datetime.utcnow()
             # Store approval response
             state.last_approval = approval_response
+            
+            # Apply human edits to state if present in approval response
+            if approval_response.get("edits"):
+                edits = approval_response["edits"]
+                # Store edits in human_edits for persistence
+                for field, value in edits.items():
+                    if field in ["input_image", "source_image", "driven_audio", "audio_file"]:
+                        state.human_edits[field] = value
+                        print(f"🧩 Applied human edit from approval: {field} = {value}")
+            
             await self.save_state(state)
             print(f"✅ DatabaseStateStore: Resumed run {run_id}")
         return state
@@ -440,6 +513,7 @@ class DatabaseStateStore(HITLStateStore):
                 approval_token=run.approval_token,
                 checkpoint_context=run.checkpoint_context,
                 last_approval=run.last_approval,
+                human_edits=run.human_edits or {},
                 step_history=step_history,
                 total_execution_time_ms=run.total_execution_time_ms,
                 human_review_time_ms=run.human_review_time_ms,
@@ -612,6 +686,110 @@ class DatabaseStateStore(HITLStateStore):
         except Exception as e:
             session.rollback()
             raise e
+        finally:
+            session.close()
+    
+    # JSONB Query Helper Methods
+    async def query_runs_by_checkpoint_type(self, checkpoint_type: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Query runs by checkpoint type using JSONB"""
+        session = self.SessionLocal()
+        try:
+            query = session.query(HITLRun).filter(
+                HITLRun.state_snapshot['checkpoint_context']['type'].astext == checkpoint_type
+            )
+            
+            if user_id:
+                query = query.filter(HITLRun.user_id == user_id)
+            
+            runs = query.all()
+            return [
+                {
+                    "run_id": str(run.run_id),
+                    "status": run.status,
+                    "current_step": run.current_step,
+                    "checkpoint_context": run.checkpoint_context,
+                    "state_snapshot": run.state_snapshot
+                }
+                for run in runs
+            ]
+        finally:
+            session.close()
+    
+    async def query_runs_with_validation_issues(self, severity: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Query runs that have validation issues using JSONB"""
+        session = self.SessionLocal()
+        try:
+            query = session.query(HITLRun).filter(
+                HITLRun.state_snapshot['validation_issues'] is not None
+            )
+            
+            if severity:
+                # Query for specific severity in validation issues array
+                query = query.filter(
+                    HITLRun.state_snapshot['validation_issues'].op('@>')([{"severity": severity}])
+                )
+            
+            runs = query.all()
+            return [
+                {
+                    "run_id": str(run.run_id),
+                    "status": run.status,
+                    "validation_issues": run.validation_issues,
+                    "state_snapshot": run.state_snapshot
+                }
+                for run in runs
+            ]
+        finally:
+            session.close()
+    
+    async def query_runs_by_pending_action(self, action: str) -> List[Dict[str, Any]]:
+        """Query runs with specific pending actions using JSONB"""
+        session = self.SessionLocal()
+        try:
+            query = session.query(HITLRun).filter(
+                HITLRun.state_snapshot['pending_actions'].op('@>')([action])
+            )
+            
+            runs = query.all()
+            return [
+                {
+                    "run_id": str(run.run_id),
+                    "status": run.status,
+                    "pending_actions": run.pending_actions,
+                    "state_snapshot": run.state_snapshot
+                }
+                for run in runs
+            ]
+        finally:
+            session.close()
+    
+    async def get_run_analytics(self) -> Dict[str, Any]:
+        """Get analytics using JSONB aggregations"""
+        session = self.SessionLocal()
+        try:
+            # Count runs by status using JSONB
+            status_counts = session.execute("""
+                SELECT state_snapshot->>'status' as status, COUNT(*) as count
+                FROM hitl_runs 
+                WHERE state_snapshot IS NOT NULL
+                GROUP BY state_snapshot->>'status'
+            """).fetchall()
+            
+            # Average execution times by checkpoint type
+            checkpoint_times = session.execute("""
+                SELECT 
+                    state_snapshot->'checkpoint_context'->>'type' as checkpoint_type,
+                    AVG((state_snapshot->>'total_execution_time_ms')::int) as avg_time
+                FROM hitl_runs 
+                WHERE state_snapshot IS NOT NULL 
+                    AND state_snapshot->'checkpoint_context'->>'type' IS NOT NULL
+                GROUP BY state_snapshot->'checkpoint_context'->>'type'
+            """).fetchall()
+            
+            return {
+                "status_distribution": {row[0]: row[1] for row in status_counts},
+                "avg_execution_time_by_checkpoint": {row[0]: row[1] for row in checkpoint_times}
+            }
         finally:
             session.close()
 

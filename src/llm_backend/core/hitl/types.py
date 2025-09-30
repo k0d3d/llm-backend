@@ -96,6 +96,7 @@ class HITLState(BaseModel):
     approval_token: Optional[str] = None
     checkpoint_context: Optional[Dict[str, Any]] = None
     last_approval: Optional[Dict[str, Any]] = None
+    human_edits: Dict[str, Any] = {}
     
     # Audit trail
     step_history: List[StepEvent] = []

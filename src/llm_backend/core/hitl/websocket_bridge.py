@@ -41,7 +41,8 @@ class WebSocketHITLBridge:
         checkpoint_type: str,
         context: Dict[str, Any],
         user_id: Optional[str] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        schema: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Request human approval through WebSocket and wait for response
@@ -52,6 +53,7 @@ class WebSocketHITLBridge:
             context: Context data for the approval request
             user_id: User to send approval request to
             session_id: Specific browser session to target
+            schema: Optional field schema metadata for editable fields
             
         Returns:
             Approval response from human reviewer
@@ -59,12 +61,17 @@ class WebSocketHITLBridge:
         approval_id = str(uuid.uuid4())
         expires_at = datetime.utcnow() + timedelta(seconds=self.approval_timeout)
         
+        # Enhance context with schema metadata if provided
+        enhanced_context = context.copy()
+        if schema:
+            enhanced_context["schema"] = schema
+        
         # Create approval request
         approval_request = {
             "approval_id": approval_id,
             "run_id": run_id,
             "checkpoint_type": checkpoint_type,
-            "context": context,
+            "context": enhanced_context,
             "user_id": user_id,
             "session_id": session_id,
             "expires_at": expires_at.isoformat(),
@@ -175,6 +182,38 @@ class WebSocketHITLBridge:
         
         logger.info(f"Processed approval response for {approval_id}: {approval_response['action']}")
         return True
+    
+    def create_field_schema(
+        self,
+        required_fields: List[str],
+        optional_fields: Dict[str, Dict[str, Any]] = None,
+        editable_fields: List[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create field schema metadata for approval requests
+        
+        Args:
+            required_fields: List of field names that must be present
+            optional_fields: Dict mapping field names to their metadata
+                           e.g., {"temperature": {"default": 0.7, "type": "float", "range": [0, 2]}}
+            editable_fields: List of fields that can be modified by humans
+            
+        Returns:
+            Schema dictionary for inclusion in approval context
+        """
+        schema = {
+            "required_fields": required_fields or [],
+            "optional_fields": optional_fields or {},
+            "editable_fields": editable_fields or []
+        }
+        
+        # If no editable fields specified, assume all fields are editable
+        if not editable_fields:
+            all_fields = set(required_fields or [])
+            all_fields.update((optional_fields or {}).keys())
+            schema["editable_fields"] = list(all_fields)
+        
+        return schema
     
     async def send_status_update(
         self,
@@ -425,9 +464,10 @@ class BrowserAgentHITLIntegration:
         action_description: str,
         browser_context: Dict[str, Any],
         user_id: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        editable_fields: List[str] = None
     ) -> Dict[str, Any]:
-        """Request approval for browser action"""
+        """Request approval for browser action with optional field schema"""
         
         context = {
             "action_description": action_description,
@@ -435,12 +475,30 @@ class BrowserAgentHITLIntegration:
             "requires_human_review": True
         }
         
+        # Create schema for common browser action fields
+        schema = None
+        if editable_fields or browser_context:
+            common_optional_fields = {
+                "selector": {"type": "string", "description": "CSS selector for element"},
+                "text": {"type": "string", "description": "Text to input or click"},
+                "url": {"type": "string", "description": "URL to navigate to"},
+                "wait_time": {"default": 1.0, "type": "float", "description": "Wait time in seconds"},
+                "screenshot": {"default": True, "type": "boolean", "description": "Take screenshot after action"}
+            }
+            
+            schema = self.bridge.create_field_schema(
+                required_fields=["action_description"],
+                optional_fields=common_optional_fields,
+                editable_fields=editable_fields
+            )
+        
         return await self.bridge.request_human_approval(
             run_id=run_id,
             checkpoint_type="browser_action_approval",
             context=context,
             user_id=user_id,
-            session_id=session_id
+            session_id=session_id,
+            schema=schema
         )
     
     async def notify_browser_completion(

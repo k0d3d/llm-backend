@@ -2,10 +2,10 @@
 HITL API endpoints for human-in-the-loop workflows
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
-from datetime import datetime
 import logging
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
@@ -47,7 +47,7 @@ class HITLApprovalRequest(BaseModel):
     action: Optional[str] = Field(None, description="approve, edit, or reject")
     edits: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
-    approved_by: Optional[str] = None
+    approved_by: Optional[Union[str, int]] = None
     
     # Frontend compatibility fields
     runId: Optional[str] = None
@@ -65,7 +65,9 @@ class HITLApprovalRequest(BaseModel):
         if not self.approval_id and self.runId:
             self.approval_id = self.runId
             
-        if self.approved is not None and not self.action:
+        # Only set action from approved field if no explicit action is provided
+        # Check if action is None or empty string, not just falsy
+        if self.approved is not None and (self.action is None or self.action == ""):
             self.action = "approve" if self.approved else "reject"
 
 
@@ -382,6 +384,15 @@ async def resume_run(
             state_manager=state_manager,
             websocket_bridge=websocket_bridge
         )
+        
+        # Load the updated state with human edits
+        try:
+            orchestrator.state = state
+            print(f"🔄 Loaded state with human_edits: {getattr(state, 'human_edits', 'MISSING')}")
+            print(f"🔄 Loaded state with last_approval: {getattr(state, 'last_approval', 'MISSING')}")
+        except Exception as e:
+            print(f"❌ Error loading state: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to load orchestrator state: {str(e)}")
         
         background_tasks.add_task(
             orchestrator.execute

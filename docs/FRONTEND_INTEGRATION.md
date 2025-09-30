@@ -263,7 +263,23 @@ interface HITLApprovalRequest {
     confidence_score: number;
     validation_summary: HITLValidationSummary;
     checkpoints: HITLValidationCheckpoint[];
+    // NEW: Field schema metadata for editable fields
+    schema?: {
+      required_fields: string[];
+      optional_fields: Record<string, FieldMetadata>;
+      editable_fields: string[];
+    };
   };
+}
+
+interface FieldMetadata {
+  type: 'string' | 'number' | 'boolean' | 'float' | 'integer';
+  default?: any;
+  description?: string;
+  range?: [number, number];
+  min?: number;
+  max?: number;
+  options?: string[];
 }
 
 // Enhanced WebSocket hook for HITL detection
@@ -283,7 +299,9 @@ const useRagWebSocket = ({ sessionId, authToken, onHITLRequest }) => {
           created_at: parsedData.created_at || new Date().toISOString(),
           context: parsedData.data?.context || parsedData.context || {
             message: parsedData.data?.message || "Human review required",
-            validation_summary: parsedData.data?.validation_summary || { checkpoints: [] }
+            validation_summary: parsedData.data?.validation_summary || { checkpoints: [] },
+            // Extract schema metadata if present
+            schema: parsedData.data?.context?.schema || parsedData.context?.schema
           }
         };
 
@@ -312,6 +330,281 @@ const useRagWebSocket = ({ sessionId, authToken, onHITLRequest }) => {
     }
   }, [lastMessage]);
 };
+```
+
+## Field Schema Metadata for Editable Fields
+
+### Overview
+
+The enhanced HITL system now provides field schema metadata to help frontends understand which fields can be edited, their types, defaults, and validation constraints. This enables better UX for the "edit" action in approval workflows.
+
+### Schema Structure
+
+When a HITL approval request includes editable fields, the `context.schema` object provides:
+
+```typescript
+interface HITLFieldSchema {
+  required_fields: string[];           // Fields that must be present
+  optional_fields: Record<string, FieldMetadata>;  // Fields with defaults
+  editable_fields: string[];          // Fields humans can modify
+}
+
+interface FieldMetadata {
+  type: 'string' | 'number' | 'boolean' | 'float' | 'integer';
+  default?: any;                      // Default value if not provided
+  description?: string;               // Human-readable description
+  range?: [number, number];           // Min/max for numeric fields
+  min?: number;                       // Minimum value
+  max?: number;                       // Maximum value
+  options?: string[];                 // Valid options for enum fields
+}
+```
+
+### Example Schema Usage
+
+```typescript
+// Example HITL approval request with schema
+const hitlRequest: HITLApprovalRequest = {
+  run_id: "abc-123",
+  user_id: "user-456",
+  session_id: "session-789",
+  created_at: "2024-01-15T10:30:00Z",
+  context: {
+    message: "Review AI model parameters before execution",
+    current_step: "payload_validation",
+    confidence_score: 0.85,
+    validation_summary: { checkpoints: [] },
+    schema: {
+      required_fields: ["prompt", "model"],
+      optional_fields: {
+        "temperature": {
+          type: "float",
+          default: 0.7,
+          description: "Controls randomness in generation",
+          range: [0, 2]
+        },
+        "max_tokens": {
+          type: "integer", 
+          default: 1000,
+          description: "Maximum tokens to generate",
+          min: 1,
+          max: 4000
+        },
+        "top_p": {
+          type: "float",
+          default: 1.0,
+          description: "Nucleus sampling parameter",
+          range: [0, 1]
+        }
+      },
+      editable_fields: ["prompt", "temperature", "max_tokens", "top_p"]
+    }
+  }
+};
+```
+
+### Frontend Implementation
+
+```typescript
+// Enhanced HITL validation card with field editing
+const HITLValidationCardWithEditing: React.FC<HITLValidationCardProps> = ({
+  hitlData,
+  onApprovalComplete
+}) => {
+  const [editMode, setEditMode] = useState(false);
+  const [editedFields, setEditedFields] = useState<Record<string, any>>({});
+  const schema = hitlData.context.schema;
+
+  const handleFieldEdit = (fieldName: string, value: any) => {
+    setEditedFields(prev => ({
+      ...prev,
+      [fieldName]: value
+    }));
+  };
+
+  const handleEditSubmit = async () => {
+    try {
+      await submitApproval(
+        hitlData.run_id,
+        hitlData.run_id, // approval_id
+        'edit',
+        editedFields, // Pass edited fields as edits parameter
+        undefined,
+        currentUserId
+      );
+      onApprovalComplete?.(true, hitlData.run_id);
+    } catch (error) {
+      console.error('Failed to submit edits:', error);
+    }
+  };
+
+  const renderFieldEditor = (fieldName: string, metadata: FieldMetadata) => {
+    const currentValue = editedFields[fieldName] ?? metadata.default;
+
+    switch (metadata.type) {
+      case 'string':
+        return (
+          <input
+            type="text"
+            className="form-control form-control-sm"
+            value={currentValue || ''}
+            onChange={(e) => handleFieldEdit(fieldName, e.target.value)}
+            placeholder={metadata.description}
+          />
+        );
+      
+      case 'float':
+      case 'number':
+        return (
+          <input
+            type="number"
+            className="form-control form-control-sm"
+            value={currentValue || ''}
+            onChange={(e) => handleFieldEdit(fieldName, parseFloat(e.target.value))}
+            min={metadata.min || metadata.range?.[0]}
+            max={metadata.max || metadata.range?.[1]}
+            step={metadata.type === 'float' ? 0.1 : 1}
+            placeholder={metadata.description}
+          />
+        );
+      
+      case 'boolean':
+        return (
+          <div className="form-check">
+            <input
+              type="checkbox"
+              className="form-check-input"
+              checked={currentValue || false}
+              onChange={(e) => handleFieldEdit(fieldName, e.target.checked)}
+            />
+            <label className="form-check-label text-muted small">
+              {metadata.description}
+            </label>
+          </div>
+        );
+      
+      default:
+        return (
+          <input
+            type="text"
+            className="form-control form-control-sm"
+            value={currentValue || ''}
+            onChange={(e) => handleFieldEdit(fieldName, e.target.value)}
+            placeholder={metadata.description}
+          />
+        );
+    }
+  };
+
+  return (
+    <div className="hitl-validation-card">
+      {/* Standard validation display */}
+      <div className="validation-summary">
+        <p>{hitlData.context.message}</p>
+      </div>
+
+      {/* Field editing interface */}
+      {schema && editMode && (
+        <div className="field-editor mt-3">
+          <h6 className="text-muted mb-2">Edit Parameters:</h6>
+          {schema.editable_fields.map(fieldName => {
+            const metadata = schema.optional_fields[fieldName];
+            const isRequired = schema.required_fields.includes(fieldName);
+            
+            return (
+              <div key={fieldName} className="mb-2">
+                <label className="form-label small">
+                  {fieldName}
+                  {isRequired && <span className="text-danger">*</span>}
+                  {metadata?.default !== undefined && (
+                    <span className="text-muted"> (default: {String(metadata.default)})</span>
+                  )}
+                </label>
+                {metadata ? renderFieldEditor(fieldName, metadata) : (
+                  <input
+                    type="text"
+                    className="form-control form-control-sm"
+                    onChange={(e) => handleFieldEdit(fieldName, e.target.value)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div className="d-flex gap-2 mt-3">
+        <button
+          className="btn btn-success btn-sm"
+          onClick={() => handleApprove()}
+        >
+          Approve
+        </button>
+        
+        {schema && schema.editable_fields.length > 0 && (
+          <>
+            {!editMode ? (
+              <button
+                className="btn btn-warning btn-sm"
+                onClick={() => setEditMode(true)}
+              >
+                Edit Parameters
+              </button>
+            ) : (
+              <>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={handleEditSubmit}
+                >
+                  Submit Edits
+                </button>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setEditMode(false)}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </>
+        )}
+        
+        <button
+          className="btn btn-danger btn-sm"
+          onClick={() => handleReject()}
+        >
+          Reject
+        </button>
+      </div>
+    </div>
+  );
+};
+```
+
+### Backend Integration
+
+The backend automatically includes schema metadata when calling `request_human_approval()`:
+
+```python
+# Example usage in HITL orchestrator
+schema = websocket_bridge.create_field_schema(
+    required_fields=["prompt", "model"],
+    optional_fields={
+        "temperature": {"default": 0.7, "type": "float", "range": [0, 2]},
+        "max_tokens": {"default": 1000, "type": "int", "min": 1, "max": 4000}
+    },
+    editable_fields=["prompt", "temperature", "max_tokens"]
+)
+
+approval_response = await websocket_bridge.request_human_approval(
+    run_id=run_id,
+    checkpoint_type="payload_review",
+    context={"message": "Review parameters", "payload": current_payload},
+    user_id=user_id,
+    session_id=session_id,
+    schema=schema  # Include schema metadata
+)
 ```
 
 ## Session Resume & State Management
