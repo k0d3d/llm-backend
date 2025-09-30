@@ -291,11 +291,14 @@ class HITLOrchestrator:
         
         validation_checkpoints = validator.validate_pre_execution()
         validation_summary = create_hitl_validation_summary(validation_checkpoints)
+        friendly_message = validation_summary.get("user_friendly_message", "I need your help to continue")
         
         print(f"🚨 Blocking Issues: {validation_summary['blocking_issues']}")
         
         # Store validation results in state
         self.state.validation_checkpoints = validation_summary
+        self.state.validation_summary = validation_summary
+        self.state.user_friendly_message = friendly_message
         
         # Get provider capabilities
         try:

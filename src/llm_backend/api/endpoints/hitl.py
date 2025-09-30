@@ -632,7 +632,7 @@ async def get_session_active_runs(
                     "status": run["status"],
                     "current_step": state.current_step,
                     "created_at": state.created_at.isoformat(),
-                    "message": f"HITL approval required for {state.current_step}",
+                    "message": getattr(state, 'user_friendly_message', f"HITL approval required for {state.current_step}"),
                     "pending_actions": state.pending_actions,
                     "expires_at": state.expires_at.isoformat() if state.expires_at else None,
                     "validation_summary": getattr(state, 'validation_summary', None),

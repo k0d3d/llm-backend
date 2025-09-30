@@ -87,6 +87,8 @@ class HITLState(BaseModel):
     suggested_payload: Optional[Dict[str, Any]] = None
     validation_issues: List[Dict[str, Any]] = []
     validation_checkpoints: Optional[Dict[str, Any]] = None
+    validation_summary: Optional[Dict[str, Any]] = None
+    user_friendly_message: Optional[str] = None
     raw_response: Optional[Any] = None
     processed_response: Optional[str] = None
     final_result: Optional[str] = None
