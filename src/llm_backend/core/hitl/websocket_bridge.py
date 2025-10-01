@@ -30,9 +30,12 @@ class WebSocketHITLBridge:
         self.websocket_api_key = websocket_api_key
         self.state_manager = state_manager
         self.approval_timeout = approval_timeout
-        
-        # In-memory storage for pending approvals (legacy - will be replaced by database)
-        self.pending_approvals: Dict[str, Dict[str, Any]] = {}
+
+        if state_manager is None:
+            logger.warning(
+                "WebSocketHITLBridge initialized without a state_manager; pending approvals "
+                "cannot be persisted. Configure persistent storage to avoid data loss."
+            )
         self.approval_callbacks: Dict[str, Callable] = {}
     
     async def request_human_approval(
@@ -78,12 +81,13 @@ class WebSocketHITLBridge:
             "created_at": datetime.utcnow().isoformat()
         }
         
+        if not self.state_manager:
+            raise RuntimeError(
+                "State manager not configured; cannot persist pending approvals."
+            )
+
         # Store pending approval in database
-        if self.state_manager:
-            await self.state_manager.save_pending_approval(approval_request)
-        
-        # Also store in memory for backward compatibility
-        self.pending_approvals[approval_id] = approval_request
+        await self.state_manager.save_pending_approval(approval_request)
         
         # Pause the run in state manager
         if self.state_manager:
@@ -106,14 +110,20 @@ class WebSocketHITLBridge:
             return response
             
         except asyncio.TimeoutError:
-            # Clean up expired approval
-            self.pending_approvals.pop(approval_id, None)
-            raise Exception(f"Approval request {approval_id} timed out after {self.approval_timeout} seconds")
-        
-        except Exception as e:
-            # Clean up on error
-            self.pending_approvals.pop(approval_id, None)
-            raise e
+            # Mark run as failed due to timeout
+            if self.state_manager:
+                try:
+                    await self.state_manager.resume_run(run_id, {
+                        "action": "timeout",
+                        "reason": f"Approval request timed out after {self.approval_timeout} seconds",
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to update run status on timeout: {e}")
+            
+            raise Exception(
+                f"Approval request {approval_id} timed out after {self.approval_timeout} seconds"
+            )
     
     async def handle_approval_response(self, approval_response: Dict[str, Any]) -> bool:
         """
@@ -127,36 +137,29 @@ class WebSocketHITLBridge:
         """
         approval_id = approval_response.get("approval_id")
         
-        # Debug: Log current pending approvals
-        logger.info(f"Current pending approvals: {list(self.pending_approvals.keys())}")
-        logger.info(f"Looking for approval_id: {approval_id}")
-        
-        # First try direct approval_id lookup
-        if approval_id and approval_id in self.pending_approvals:
-            # approval_data is already loaded above
-            logger.info(f"Found approval by direct lookup: {approval_id}")
-        else:
-            # Fallback: search by run_id if approval_id not found
-            # This handles cases where frontend sends runId instead of approval_id
-            pending_approval = None
-            for stored_id, approval_data in self.pending_approvals.items():
-                logger.info(f"Checking stored approval {stored_id} with run_id: {approval_data.get('run_id')}")
-                if approval_data.get("run_id") == approval_id:
-                    pending_approval = approval_data
-                    approval_id = stored_id  # Use the actual stored approval_id
-                    logger.info(f"Found approval by run_id lookup: {stored_id}")
-        
-        # Check database first, then fallback to memory
+        if not self.state_manager:
+            logger.error("State manager is required to process approval responses")
+            return False
+
         approval_data = None
-        if self.state_manager:
+        for attempt in range(5):
+            logger.info(
+                "Attempting to load approval %s from state manager (attempt %d)",
+                approval_id,
+                attempt + 1,
+            )
             approval_data = await self.state_manager.load_pending_approval(approval_id)
-        
-        if not approval_data and approval_id in self.pending_approvals:
-            approval_data = self.pending_approvals[approval_id]
-        
+            if approval_data:
+                logger.info(
+                    "Successfully loaded approval %s from state manager", approval_id
+                )
+                break
+            await asyncio.sleep(0.5)
+
         if not approval_data:
-            logger.warning(f"Received response for unknown approval: {approval_id}")
-            logger.warning(f"Available approvals: {list(self.pending_approvals.keys())}")
+            logger.warning(
+                "Received response for unknown approval: %s", approval_id
+            )
             return False
         
         # Validate response
@@ -166,9 +169,8 @@ class WebSocketHITLBridge:
             return False
         
         # Store response and trigger callback
-        pending_approval = self.pending_approvals[approval_id]
-        pending_approval["response"] = approval_response
-        pending_approval["responded_at"] = datetime.utcnow().isoformat()
+        approval_data["response"] = approval_response
+        approval_data["responded_at"] = datetime.utcnow().isoformat()
         
         # Trigger callback if registered
         if approval_id in self.approval_callbacks:
@@ -176,9 +178,7 @@ class WebSocketHITLBridge:
             callback(approval_response)
         
         # Clean up from both database and memory
-        if self.state_manager:
-            await self.state_manager.remove_pending_approval(approval_id)
-        self.pending_approvals.pop(approval_id, None)
+        await self.state_manager.remove_pending_approval(approval_id)
         
         logger.info(f"Processed approval response for {approval_id}: {approval_response['action']}")
         return True
@@ -348,43 +348,27 @@ class WebSocketHITLBridge:
     async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List pending approvals for a user"""
         
-        # Use database if available, otherwise fallback to memory
-        if self.state_manager:
-            return await self.state_manager.list_pending_approvals(user_id)
-        
-        # Legacy memory-based implementation
-        approvals = []
-        for approval_id, approval_data in self.pending_approvals.items():
-            if not user_id or approval_data.get("user_id") == user_id:
-                # Check if expired
-                expires_at = datetime.fromisoformat(approval_data["expires_at"])
-                if datetime.utcnow() > expires_at:
-                    # Mark as expired and remove
-                    self.pending_approvals.pop(approval_id, None)
-                    continue
-                
-                approvals.append({
-                    "approval_id": approval_id,
-                    "run_id": approval_data["run_id"],
-                    "checkpoint_type": approval_data["checkpoint_type"],
-                    "context": approval_data["context"],
-                    "created_at": approval_data["created_at"],
-                    "expires_at": approval_data["expires_at"]
-                })
-        
-        return approvals
+        if not self.state_manager:
+            raise RuntimeError(
+                "State manager not configured; cannot list pending approvals."
+            )
+
+        return await self.state_manager.list_pending_approvals(user_id)
     
     async def cancel_approval(self, approval_id: str, reason: str = "Cancelled") -> bool:
         """Cancel a pending approval"""
         
-        # Check if approval exists in database or memory
-        approval_exists = False
-        if self.state_manager:
-            approval_data = await self.state_manager.load_pending_approval(approval_id)
-            approval_exists = approval_data is not None
-        
-        if not approval_exists and approval_id not in self.pending_approvals:
+        if not self.state_manager:
+            raise RuntimeError(
+                "State manager not configured; cannot cancel pending approvals."
+            )
+
+        approval_data = await self.state_manager.load_pending_approval(approval_id)
+        if not approval_data:
             return False
+        
+        # Get run_id to update run status
+        run_id = approval_data.get("run_id")
         
         # Trigger callback with cancellation
         if approval_id in self.approval_callbacks:
@@ -396,11 +380,20 @@ class WebSocketHITLBridge:
                 "timestamp": datetime.utcnow().isoformat()
             })
         
-        # Clean up from both database and memory
-        if self.state_manager:
-            await self.state_manager.remove_pending_approval(approval_id)
-        self.pending_approvals.pop(approval_id, None)
+        # Clean up from database
+        await self.state_manager.remove_pending_approval(approval_id)
         
+        # Mark associated run as cancelled to remove from /active list
+        if run_id:
+            try:
+                await self.state_manager.resume_run(run_id, {
+                    "action": "cancelled",
+                    "reason": reason,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Failed to update run status on cancellation: {e}")
+
         logger.info(f"Cancelled approval {approval_id}: {reason}")
         return True
 

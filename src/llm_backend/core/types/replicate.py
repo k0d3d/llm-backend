@@ -1,6 +1,5 @@
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import List, Dict, Literal
-from typing import Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 class Props(BaseModel):
@@ -18,7 +17,7 @@ class OperationType(BaseModel):
 class AgentPayload(BaseModel):
     input: PayloadInput
     operationType: OperationType
-    
+
     @field_validator('input')
     @classmethod
     def input_not_empty(cls, v: Dict) -> Dict:
@@ -34,7 +33,8 @@ class ExampleInput(BaseModel):
     props: Optional[Props] = None
     image_file: Optional[str] = None
     video_file: Optional[str] = None
-    hitl_edits: Optional[Dict] = None  # HITL human edits to integrate
+    attachments: Optional[List[str]] = None
+    hitl_edits: Optional[Dict[str, Any]] = None  # HITL human edits to integrate
 
 class InformationInputResponse(BaseModel):
     continue_run: bool
@@ -44,3 +44,63 @@ class InformationInputPayload(BaseModel):
     example_input: dict
     description: str
     attached_file: Optional[str] = None
+
+
+class ValidationIssueDetail(BaseModel):
+    field: str
+    issue: str
+    severity: Literal["info", "warning", "error"] = "error"
+    suggested_fix: Optional[str] = None
+    auto_fixable: bool = False
+
+
+class FileRequirementContext(BaseModel):
+    prompt: str
+    example_input: Dict[str, Any]
+    model_name: str
+    model_description: str
+    existing_payload: Dict[str, Any]
+    hitl_edits: Dict[str, Any] = {}
+    attachments: List[str] = []
+
+
+class FileRequirementAnalysis(BaseModel):
+    required_files: List[str]
+    blocking_issues: List[ValidationIssueDetail]
+    ready: bool
+    suggestions: List[str] = []
+
+
+class PayloadValidationContext(BaseModel):
+    prompt: str
+    example_input: Dict[str, Any]
+    candidate_payload: AgentPayload
+    required_files: List[str] = []
+    hitl_edits: Dict[str, Any] = {}
+    attachments: List[str] = []
+    operation_type: Literal['image', 'video', 'text', 'audio'] = 'image'
+
+
+class PayloadValidationOutput(BaseModel):
+    payload: AgentPayload
+    blocking_issues: List[ValidationIssueDetail]
+    warnings: List[ValidationIssueDetail] = []
+    ready: bool = True
+    auto_fixes: Dict[str, Any] = {}
+    summary: Optional[str] = None
+
+
+class FinalGuardContext(BaseModel):
+    prompt: str
+    example_input: Dict[str, Any]
+    candidate_payload: AgentPayload
+    model_name: str
+    model_description: str
+    operation_type: Literal['image', 'video', 'text', 'audio'] = 'image'
+
+
+class FinalGuardDecision(BaseModel):
+    approved: bool
+    payload: AgentPayload
+    blocking_issues: List[ValidationIssueDetail] = []
+    diff_summary: Optional[str] = None

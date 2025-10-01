@@ -443,12 +443,22 @@ class DatabaseStateStore(HITLStateStore):
             await self.save_state(state)
             print(f"✅ DatabaseStateStore: Paused run {run_id} at checkpoint {checkpoint_type}")
     
-    async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> HITLState:
-        """Resume run with human approval/edits"""
+    async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> Optional[HITLState]:
+        """Resume a paused run with approval response"""
         state = await self.load_state(run_id)
         if state:
             from llm_backend.core.hitl.types import HITLStatus
-            state.status = HITLStatus.RUNNING
+            
+            action = approval_response.get("action", "approve")
+            
+            # Handle different actions
+            if action in ["timeout", "cancelled"]:
+                state.status = HITLStatus.FAILED
+                print(f"✅ DatabaseStateStore: Marked run {run_id} as failed due to {action}")
+            else:
+                state.status = HITLStatus.RUNNING
+                print(f"✅ DatabaseStateStore: Resumed run {run_id}")
+            
             state.updated_at = datetime.utcnow()
             # Store approval response
             state.last_approval = approval_response
@@ -463,7 +473,6 @@ class DatabaseStateStore(HITLStateStore):
                         print(f"🧩 Applied human edit from approval: {field} = {value}")
             
             await self.save_state(state)
-            print(f"✅ DatabaseStateStore: Resumed run {run_id}")
         return state
     
     async def load_state(self, run_id: str) -> Optional[HITLState]:

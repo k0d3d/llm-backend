@@ -1,9 +1,23 @@
 
+import json
 import os
+from typing import Any, Dict, List, Optional
 
 from pydantic_ai import Agent, ModelRetry, RunContext, Tool
 from llm_backend.core.types.common import MessageType
-from llm_backend.core.types.replicate import ExampleInput, AgentPayload, InformationInputResponse, InformationInputPayload
+from llm_backend.core.types.replicate import (
+    AgentPayload,
+    ExampleInput,
+    FinalGuardContext,
+    FinalGuardDecision,
+    FileRequirementAnalysis,
+    FileRequirementContext,
+    InformationInputPayload,
+    InformationInputResponse,
+    PayloadValidationContext,
+    PayloadValidationOutput,
+    ValidationIssueDetail,
+)
 from llm_backend.tools.replicate_tool import run_replicate
 from llm_backend.core.helpers import send_data_to_url_async
 
@@ -20,235 +34,389 @@ class ReplicateTeam:
         self.description = tool_config.get("description", "")
         self.latest_version = tool_config.get("latest_version", "")
         self.model_name = tool_config.get("model_name", "")
+        self.attachments = self._collect_attachments()
+        self.hitl_edits = self._resolve_hitl_edits()
+        self.operation_type = self._resolve_operation_type()
 
-    def response_audit_agent(self):
-        response_audit_agent = Agent(
-            "openai:gpt-4o",
-            deps_type=str,
-            output_type=str,
-            system_prompt=(
-                """
-                You are an AI assistant that provides feedback to users about their requests, responses, or errors.
-                The user does not need to know information like the provider (e.g. Replicate.com).
-                Remove all links to providers and their websites.
-                """
-            )
+    def _collect_attachments(self) -> List[str]:
+        """Gather candidate attachment URLs from run input and tool config."""
+        attachments: List[str] = []
+        sources: List[Dict[str, Any]] = []
+
+        agent_tool_config = getattr(self.run_input, "agent_tool_config", None)
+        if isinstance(agent_tool_config, dict):
+            replicate_entry = agent_tool_config.get("replicate-agent-tool") or agent_tool_config.get("replicate_agent_tool")
+            if isinstance(replicate_entry, dict):
+                sources.append(replicate_entry)
+                data = replicate_entry.get("data")
+                if isinstance(data, dict):
+                    sources.append(data)
+
+        sources.append(self.tool_config)
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            raw_attachments = source.get("attachments")
+            if isinstance(raw_attachments, list):
+                for item in raw_attachments:
+                    if isinstance(item, str) and item and item not in attachments:
+                        attachments.append(item)
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            last_asset = source.get("last_uploaded_asset")
+            if isinstance(last_asset, str) and last_asset and last_asset not in attachments:
+                attachments.append(last_asset)
+
+        return attachments
+
+    def _resolve_hitl_edits(self) -> Dict[str, Any]:
+        """Merge human edits from tool config, run input metadata, and orchestrator state."""
+        edits: Dict[str, Any] = {}
+
+        agent_tool_config = getattr(self.run_input, "agent_tool_config", None)
+        if isinstance(agent_tool_config, dict):
+            replicate_entry = agent_tool_config.get("replicate-agent-tool") or agent_tool_config.get("replicate_agent_tool")
+            if isinstance(replicate_entry, dict):
+                entry_edits = replicate_entry.get("hitl_edits")
+                if isinstance(entry_edits, dict):
+                    edits.update(entry_edits)
+                data = replicate_entry.get("data")
+                if isinstance(data, dict):
+                    data_edits = data.get("hitl_edits")
+                    if isinstance(data_edits, dict):
+                        edits.update(data_edits)
+
+        config_edits = self.tool_config.get("hitl_edits")
+        if isinstance(config_edits, dict):
+            edits.update(config_edits)
+
+        runtime_edits = getattr(self.run_input, "human_edits", None)
+        if isinstance(runtime_edits, dict):
+            edits.update(runtime_edits)
+
+        return edits
+
+    def _resolve_operation_type(self) -> str:
+        """Infer operation type for downstream validation."""
+        candidate = (
+            self.tool_config.get("operation_type")
+            or self.tool_config.get("operationType")
+            or "image"
         )
+        if candidate not in {"image", "video", "text", "audio"}:
+            return "image"
+        return candidate
 
-        @response_audit_agent.system_prompt
-        def response_content(ctx: RunContext[str]) -> str:
-            return f"Message: {ctx.deps}"
+    def file_requirement_agent(self) -> Agent:
+        """Agent responsible for determining required file inputs."""
 
-        return response_audit_agent
+        def schema_inspector(ctx: RunContext[FileRequirementContext]) -> Dict[str, Any]:
+            schema = ctx.deps.example_input or {}
+            schema_keys = list(schema.keys()) if isinstance(schema, dict) else []
 
-    def api_interaction_agent(self):
-        """
-          API Interaction Agent
-          Handles authentication with Replicate.com
-          Sends requests and receives responses
-          Manages retry logic and error handling
-        """
+            image_like = [key for key in schema_keys if "image" in key.lower() or "frame" in key.lower()]
+            audio_like = [key for key in schema_keys if "audio" in key.lower() or "voice" in key.lower()]
+            video_like = [key for key in schema_keys if "video" in key.lower()]
 
+            has_prompt = any("prompt" in key.lower() for key in schema_keys)
 
-        def send_request_using_replicate_tool(ctx: RunContext[AgentPayload]):
-            """
-            Send the request to replicate.com and receive the response.
-            When providing feedback, about the request, response or error,
-            the user does not need to know information like the provider (e.g. Replicate.com).
-            You can however, use the response to provide helpful feedback to the user.
-            """
-            print("Sending request to replicate.com")
-            run, status_code = run_replicate(
-                run_input=self.run_input,
-                model_params={
-                  "example_input": self.example_input,
-                  "latest_version": self.latest_version,
-                },
-                input=ctx.deps.input,
-                operation_type=ctx.deps.operationType.type,
-            )
-            # print("Received response from replicate.com")
-            # print("Response:", run)
-            return run
+            return {
+                "schema_keys": schema_keys,
+                "image_like": image_like,
+                "audio_like": audio_like,
+                "video_like": video_like,
+                "has_prompt": has_prompt,
+                "hitl_edits": ctx.deps.hitl_edits,
+                "attachments": ctx.deps.attachments,
+                "model_name": ctx.deps.model_name,
+                "model_description": ctx.deps.model_description,
+                "existing_payload": ctx.deps.existing_payload,
+            }
 
-        api_interaction_agent = Agent(
+        agent = Agent(
             "openai:gpt-4o",
-            deps_type=AgentPayload,
-            output_type=str,
+            deps_type=FileRequirementContext,
+            output_type=FileRequirementAnalysis,
             system_prompt=(
                 """
-                Provided with a payload, send the request to replicate.com.
+                You are a Guardrail Agent that determines whether running the current model requires
+                specific file inputs. Use the available schema inspection tool to understand the
+                example_input, existing payload, model name, and description before responding.
 
+                When you respond:
+                - Populate required_files as a list of normalized types (e.g. "image", "audio").
+                - Populate blocking_issues with ValidationIssueDetail entries when a required file is missing.
+                - Set ready to False if blocking issues are present.
+                - Add human friendly suggestions when action is required.
+
+                Respond strictly with the FileRequirementAnalysis schema.
                 """
             ),
             tools=[
                 Tool(
-                    send_request_using_replicate_tool, takes_ctx=True, max_retries=5
+                    schema_inspector,
+                    takes_ctx=True,
+                    description="Inspect the example_input schema, model description, and gather heuristic hints for required files."
                 )
-            ]
+            ],
         )
 
+        return agent
 
-        return api_interaction_agent
+    def payload_validation_agent(self) -> Agent:
+        """Agent that validates the candidate payload against requirements."""
 
+        def payload_snapshot(ctx: RunContext[PayloadValidationContext]) -> Dict[str, Any]:
+            payload_dict = ctx.deps.candidate_payload.input.model_dump() if ctx.deps.candidate_payload else {}
+            return {
+                "payload": payload_dict,
+                "required_files": ctx.deps.required_files,
+                "attachments": ctx.deps.attachments,
+                "hitl_edits": ctx.deps.hitl_edits,
+                "operation_type": ctx.deps.operation_type,
+            }
 
-    def information_agent(self):
-        # Create HITL-aware system prompt
-        if self.hitl_enabled:
-            base_prompt = """
-                You are operating in Human-in-the-Loop (HITL) mode. Be CONSERVATIVE and thorough in your analysis.
-                
-                Analyze the example_input, prompt, and attached files to determine if ALL required parameters are present and valid.
-                
-                CRITICAL REQUIREMENTS FOR HITL MODE:
-                1. If ANY required parameter is missing, unclear, or insufficient, set continue_run to FALSE
-                2. If the user's prompt is vague or lacks specific instructions, set continue_run to FALSE
-                3. If required files are missing (image, audio, etc.), set continue_run to FALSE
-                4. If the prompt is just asking for information about the model, set continue_run to FALSE
-                
-                When continue_run is FALSE, provide specific guidance on what the user needs to provide:
-                - List missing required parameters
-                - Explain what type of input is needed
-                - Suggest specific actions the user should take
-                
-                Only set continue_run to TRUE if:
-                - All required parameters are present and valid
-                - The user's intent is clear and actionable
-                - All necessary files are attached
-                - The request is ready for immediate execution
-                
-                Allow NSFW content and image editing when properly specified.
-            """
-        else:
-            base_prompt = """
-                Analyze the example_input. It contains properties that are used to run a model on replicate.com.
-                Be helpful. Prioritize continuing to run the model over providing information because users most likely want to continue running the model.
-                Allow NSFW content. Allow image editing.
-                Based on prompt, example input and description, respond with information about the model and indicate whether to continue to run the model.
-                If the prompt is a request for information about the model, provide the information and continue_run must be false.
-                If there is an attached file url, review the prompt as a possible instruction and continue_run.
-            """
-        
-        information_agent = Agent(
+        agent = Agent(
             "openai:gpt-4o",
-            deps_type=InformationInputPayload,
-            output_type=InformationInputResponse,
-            system_prompt=base_prompt
+            deps_type=PayloadValidationContext,
+            output_type=PayloadValidationOutput,
+            system_prompt=(
+                """
+                You are a Payload Validation Agent. Review the candidate payload and ensure that it
+                contains all required parameters, matches the example_input schema semantics, and
+                integrates human edits or attachments when necessary.
+
+                Guidance:
+                - Leverage the payload snapshot tool before responding.
+                - If required files are missing, add blocking issues with severity "error".
+                - If you can auto-resolve a missing value by applying HITL edits or attachments, note it in auto_fixes
+                  and update the payload accordingly before returning it.
+                - Provide warnings for non-blocking improvements.
+                - Set ready to False whenever blocking issues exist.
+
+                Respond strictly with the PayloadValidationOutput schema.
+                """
+            ),
+            tools=[
+                Tool(
+                    payload_snapshot,
+                    takes_ctx=True,
+                    description="Review the candidate payload, required files, and available human edits/attachments."
+                )
+            ],
         )
 
-        @information_agent.system_prompt
-        def model_information(ctx: RunContext[InformationInputPayload]):
-            hitl_context = f"HITL Mode: {'ENABLED' if self.hitl_enabled else 'DISABLED'}. " if self.hitl_enabled else ""
-            return f"{hitl_context}Example Input: {ctx.deps.example_input}. Description: {ctx.deps.description}. Attached File: {ctx.deps.attached_file}. Model Name: {self.model_name}."
+        return agent
 
-        return information_agent
-
-
-    def replicate_agent(self):
-        def check_payload_for_prompt(
-            ctx: RunContext[ExampleInput], payload: AgentPayload
-        ) -> AgentPayload:
-            """
-            Check if the payload values contains the exact prompt string.
-            This improves accuracy of the result.
-
-            """
-            payload_input_dict = payload.input
-            payload_values = payload_input_dict.model_dump().values()
-            
-            # Convert values to strings for comparison
-            payload_str_values = [str(v) for v in payload_values]
-            
-            # Check for prompt - only raise ModelRetry if prompt is provided and not found
-            if ctx.deps.prompt and ctx.deps.prompt.strip():
-                prompt_found = any(ctx.deps.prompt in str_val for str_val in payload_str_values)
-                if not prompt_found:
-                    raise ModelRetry(f"Payload does not contain the prompt. Add '{ctx.deps.prompt}' to the payload.")
-            
-            # Check for image file - only raise ModelRetry if image file is provided and not found
-            if ctx.deps.image_file and ctx.deps.image_file.strip():
-                image_found = any(ctx.deps.image_file in str_val for str_val in payload_str_values)
-                if not image_found:
-                    raise ModelRetry(f"Payload does not contain the image file. Add '{ctx.deps.image_file}' to the payload.")
-
-            return payload
-
-
-        replicate_agent = Agent(
+    def replicate_agent(self) -> Agent:
+        """Agent that generates the Replicate API payload from example input and prompt."""
+        
+        agent = Agent(
             "openai:gpt-4o",
             deps_type=ExampleInput,
             output_type=AgentPayload,
             system_prompt=(
                 """
-            You are an intelligent field mapping agent for Replicate models. Your job is to create optimal payloads by understanding model schemas and user intent.
-            
-            CORE RESPONSIBILITIES:
-            1. Analyze the example_input schema to understand field relationships and priorities
-            2. Map user inputs (prompt, attachments, HITL edits) to the correct model fields
-            3. Create a valid JSON payload that follows the example_input schema exactly
-            4. Handle semantic field mapping (e.g., input_image → image for background removal models)
-            
-            INTELLIGENT FIELD MAPPING RULES:
-            - For TEXT fields: Map prompt to the most appropriate field (prompt > text > input > instruction)
-            - For IMAGE fields: Prioritize based on model purpose:
-              * Background removal models: input_image/source_image → image
-              * Image generation: prompt → prompt, reference images → image/input_image
-              * Image editing: source → image/input_image, instructions → prompt
-            - For AUDIO fields: Map to audio/file/input based on schema
-            
-            HITL EDIT INTEGRATION:
-            - When HITL edits are provided (e.g., {"input_image": "url", "source_image": "url"}), intelligently map them:
-              * If example_input has "image" but edits have "input_image", map input_image → image
-              * If example_input has both, use the most specific field for the model type
-              * Preserve user intent while respecting model schema
-            
-            SCHEMA ANALYSIS:
-            - Identify primary vs secondary fields (image vs image_url)
-            - Understand field purposes from names and model description
-            - Detect required vs optional parameters
-            
-            OUTPUT REQUIREMENTS:
-            - Return exact example_input structure with mapped values
-            - Include operationType based on model description analysis
-            - Ensure all user inputs are represented in the final payload
-            - DO NOT create fields not in example_input
-            - DO NOT wrap in parent objects
-            
-            VALIDATION:
-            - Verify prompt appears in final payload if provided
-            - Verify image files appear in appropriate fields if provided
-            - Ensure HITL edits are properly integrated
-          """
+                You are a Replicate Payload Generation Agent. Your job is to transform the user's prompt
+                and any provided files into a valid Replicate API payload that matches the example_input schema.
+                
+                Guidelines:
+                - Use the example_input as your schema template
+                - Integrate the user's prompt into appropriate text/prompt fields
+                - Apply any image_file or attachments to relevant image/file fields
+                - Honor any hitl_edits by overriding corresponding fields
+                - Preserve the structure and field names from example_input
+                - Only include fields that exist in the example_input schema
+                
+                Respond strictly with the AgentPayload schema containing the transformed input.
+                """
             ),
-            tools=[Tool(check_payload_for_prompt, takes_ctx=True, max_retries=5, description="Check if the payload contains the prompt string and image file.")],
+        )
+        
+        return agent
+
+    def information_agent(self) -> Agent:
+        """Agent that analyzes if the request can proceed or needs more information."""
+        
+        agent = Agent(
+            "openai:gpt-4o",
+            deps_type=InformationInputPayload,
+            output_type=InformationInputResponse,
+            system_prompt=(
+                """
+                You are an Information Gathering Agent. Analyze the user's prompt and determine if
+                you have enough information to proceed with the Replicate model execution.
+                
+                Guidelines:
+                - Check if the prompt is clear and actionable
+                - Verify if required files are present when needed
+                - Set continue_run to True if you can proceed
+                - Set continue_run to False if you need clarification or more information
+                - Provide helpful response_information explaining what's needed or confirming readiness
+                
+                Respond strictly with the InformationInputResponse schema.
+                """
+            ),
+        )
+        
+        return agent
+
+    def api_interaction_agent(self) -> Agent:
+        """Agent that executes the Replicate API call."""
+        
+        async def execute_replicate(ctx: RunContext[AgentPayload]) -> Dict[str, Any]:
+            """Execute the Replicate API call with the provided payload."""
+            payload_dict = ctx.deps.input.model_dump()
+            result = await run_replicate(
+                version=ctx.deps.version or self.latest_version,
+                input_data=payload_dict,
+            )
+            return result
+        
+        agent = Agent(
+            "openai:gpt-4o",
+            deps_type=AgentPayload,
+            system_prompt=(
+                """
+                You are an API Interaction Agent. Execute the Replicate API call and return the result.
+                Use the execute_replicate tool to make the actual API call.
+                """
+            ),
+            tools=[
+                Tool(
+                    execute_replicate,
+                    takes_ctx=True,
+                    description="Execute the Replicate API call with the validated payload."
+                )
+            ],
+        )
+        
+        return agent
+
+    def response_audit_agent(self) -> Agent:
+        """Agent that audits and formats the Replicate API response."""
+        
+        agent = Agent(
+            "openai:gpt-4o",
+            system_prompt=(
+                """
+                You are a Response Audit Agent. Review the Replicate API response and format it
+                for the end user. Extract relevant output URLs, status information, and any errors.
+                Provide a clean, user-friendly summary of the results.
+                """
+            ),
+        )
+        
+        return agent
+
+    def final_guard_agent(self) -> Agent:
+        """Agent that performs a final schema compliance check before execution."""
+
+        def compute_schema_diff(ctx: RunContext[FinalGuardContext]) -> Dict[str, Any]:
+            candidate_payload = ctx.deps.candidate_payload.input.model_dump() if ctx.deps.candidate_payload else {}
+            return {
+                "example_input": ctx.deps.example_input,
+                "candidate_payload": candidate_payload,
+                "model_name": ctx.deps.model_name,
+                "model_description": ctx.deps.model_description,
+                "operation_type": ctx.deps.operation_type,
+                "diff_preview": json.dumps({
+                    "example_input": ctx.deps.example_input,
+                    "candidate_payload": candidate_payload,
+                }, indent=2),
+            }
+
+        agent = Agent(
+            "openai:gpt-4o",
+            deps_type=FinalGuardContext,
+            output_type=FinalGuardDecision,
+            system_prompt=(
+                """
+                You are the Final Guard Agent. Confirm that the payload about to be sent to the provider
+                follows the example_input schema exactly (field names, types, and presence) and honours
+                human edits. You must:
+                - Use the compute_schema_diff tool to compare candidate payload against example_input.
+                - Reject (approved = False) when required fields are missing, wrong, or incompatible.
+                - Provide blocking issues containing actionable feedback for any mismatches.
+                - Include a concise diff_summary highlighting important differences when available.
+
+                Respond strictly with the FinalGuardDecision schema.
+                """
+            ),
+            tools=[
+                Tool(
+                    compute_schema_diff,
+                    takes_ctx=True,
+                    description="Produce a JSON diff preview between example_input and the candidate payload."
+                )
+            ],
         )
 
-        @replicate_agent.system_prompt
-        def get_example_input(ctx: RunContext[ExampleInput]):
-            return f"Example input: {ctx.deps.example_input}"
+        return agent
 
-        @replicate_agent.system_prompt
-        def get_description(ctx: RunContext[ExampleInput]):
-            return f"Model description: {ctx.deps.description}"
+    def _format_issue_payload(
+        self,
+        stage: str,
+        issues: List[ValidationIssueDetail],
+        suggestions: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        issue_dicts: List[Dict[str, Any]] = []
+        message_lines = [f"{stage} requires attention:"]
 
-        @replicate_agent.system_prompt
-        def get_prompt(ctx: RunContext[ExampleInput]):
-            return f"Prompt: {ctx.deps.prompt}"
+        for issue in issues:
+            issue_dict = {
+                "field": issue.field,
+                "issue": issue.issue,
+                "severity": issue.severity,
+                "suggested_fix": issue.suggested_fix,
+                "auto_fixable": issue.auto_fixable,
+            }
+            issue_dicts.append(issue_dict)
 
-        @replicate_agent.system_prompt
-        def get_image_file(ctx: RunContext[ExampleInput]):
-            return f"Image file url: {ctx.deps.image_file}"
-        
-        @replicate_agent.system_prompt
-        def get_hitl_edits(ctx: RunContext[ExampleInput]):
-            if ctx.deps.hitl_edits:
-                return f"HITL Human Edits (integrate these into the payload): {ctx.deps.hitl_edits}"
-            return "No HITL edits provided."
+            detail_line = f"- [{issue.severity.upper()}] {issue.field}: {issue.issue}"
+            message_lines.append(detail_line)
+            if issue.suggested_fix:
+                message_lines.append(f"  Suggestion: {issue.suggested_fix}")
 
+        if suggestions:
+            message_lines.append("Recommended next steps:")
+            for item in suggestions:
+                if item:
+                    message_lines.append(f"* {item}")
 
-        return replicate_agent
+        return {
+            "stage": stage,
+            "issues": issue_dicts,
+            "suggestions": suggestions or [],
+            "message": "\n".join(message_lines),
+        }
+
+    async def _notify_blocking(
+        self,
+        stage: str,
+        issues: List[ValidationIssueDetail],
+        suggestions: Optional[List[str]] = None,
+    ) -> str:
+        payload = self._format_issue_payload(stage, issues, suggestions)
+        message_type = MessageType["REPLICATE_PREDICTION"]
+        await send_data_to_url_async(
+            data=payload,
+            url=f"{CORE_API_URL}/from-llm",
+            crew_input=self.run_input,
+            message_type=message_type,
+        )
+        return payload["message"]
 
     async def run(self):
+        primary_image = (
+            self.hitl_edits.get("input_image")
+            or self.hitl_edits.get("source_image")
+            or self.hitl_edits.get("image")
+            or (self.attachments[0] if self.attachments else None)
+        )
 
         information_agent = self.information_agent()
         information = await information_agent.run(
@@ -256,21 +424,42 @@ class ReplicateTeam:
             deps=InformationInputPayload(
                 example_input=self.example_input,
                 description=self.description,
-                attached_file=None
+                attached_file=primary_image,
             ),
         )
 
         if not information.output.continue_run:
-
-            message_type = MessageType["REPLICATE_PREDICTION"]
-
             await send_data_to_url_async(
                 data=information.output.response_information,
                 url=f"{CORE_API_URL}/from-llm",
                 crew_input=self.run_input,
-                message_type=message_type,
+                message_type=MessageType["REPLICATE_PREDICTION"],
             )
             return information.output.response_information
+
+        # Stage 1: File requirement detection
+        file_requirement_agent = self.file_requirement_agent()
+        file_requirement_context = FileRequirementContext(
+            prompt=self.prompt,
+            example_input=self.example_input,
+            model_name=self.model_name,
+            model_description=self.description,
+            existing_payload=self.example_input if isinstance(self.example_input, dict) else {},
+            hitl_edits=self.hitl_edits,
+            attachments=self.attachments,
+        )
+        file_analysis_result = await file_requirement_agent.run(
+            "Determine if additional file inputs are required before executing the model.",
+            deps=file_requirement_context,
+        )
+        file_analysis = file_analysis_result.output
+
+        if not file_analysis.ready:
+            return await self._notify_blocking(
+                "File Requirement Review",
+                file_analysis.blocking_issues,
+                file_analysis.suggestions,
+            )
 
         replicate_agent = self.replicate_agent()
         replicate_result = await replicate_agent.run(
@@ -279,14 +468,73 @@ class ReplicateTeam:
                 example_input=self.example_input,
                 description=information.output.response_information,
                 prompt=self.prompt,
-                image_file=None,
+                image_file=primary_image,
+                attachments=self.attachments,
+                hitl_edits=self.hitl_edits,
             ),
         )
+
+        # Stage 2: Payload validation
+        payload_validation_agent = self.payload_validation_agent()
+        payload_validation_context = PayloadValidationContext(
+            prompt=self.prompt,
+            example_input=self.example_input,
+            candidate_payload=replicate_result.output,
+            required_files=file_analysis.required_files,
+            hitl_edits=self.hitl_edits,
+            attachments=self.attachments,
+            operation_type=self.operation_type,
+        )
+        payload_validation_result = await payload_validation_agent.run(
+            "Validate the candidate payload before execution.",
+            deps=payload_validation_context,
+        )
+        payload_validation_output = payload_validation_result.output
+
+        if not payload_validation_output.ready:
+            suggestions = []
+            if payload_validation_output.summary:
+                suggestions.append(payload_validation_output.summary)
+            return await self._notify_blocking(
+                "Payload Validation",
+                payload_validation_output.blocking_issues,
+                suggestions or None,
+            )
+
+        validated_payload = payload_validation_output.payload
+
+        # Stage 3: Final guard check
+        final_guard_agent = self.final_guard_agent()
+        final_guard_context = FinalGuardContext(
+            prompt=self.prompt,
+            example_input=self.example_input,
+            candidate_payload=validated_payload,
+            model_name=self.model_name,
+            model_description=self.description,
+            operation_type=self.operation_type,
+        )
+        final_guard_result = await final_guard_agent.run(
+            "Perform a final schema compliance guard before execution.",
+            deps=final_guard_context,
+        )
+        final_guard_output = final_guard_result.output
+
+        if not final_guard_output.approved:
+            suggestions = []
+            if final_guard_output.diff_summary:
+                suggestions.append(final_guard_output.diff_summary)
+            return await self._notify_blocking(
+                "Final Guard",
+                final_guard_output.blocking_issues,
+                suggestions or None,
+            )
+
+        approved_payload = final_guard_output.payload
 
         api_interaction_agent = self.api_interaction_agent()
         api_result = await api_interaction_agent.run(
             "Send the request to replicate.com and receive the response.",
-            deps=replicate_result.output,
+            deps=approved_payload,
         )
 
         response_audit_agent = self.response_audit_agent()

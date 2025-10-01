@@ -248,11 +248,16 @@ class HITLOrchestrator:
                 print("⚠️ No session_id found for WebSocket notification")
                 return
             
-            # Configure bridge from environment
-            ws_url = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
-            ws_key = os.getenv("WEBSOCKET_API_KEY")
-            print(f"🔧 WebSocket config: url={ws_url}, api_key_present={bool(ws_key)}")
-            bridge = WebSocketHITLBridge(websocket_url=ws_url, websocket_api_key=ws_key)
+            # Use shared bridge if available, otherwise fallback to creating one
+            if self.websocket_bridge:
+                bridge = self.websocket_bridge
+                print("🔧 Using shared WebSocket bridge")
+            else:
+                # Fallback: Configure bridge from environment
+                ws_url = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
+                ws_key = os.getenv("WEBSOCKET_API_KEY")
+                print(f"🔧 WebSocket config: url={ws_url}, api_key_present={bool(ws_key)}")
+                bridge = WebSocketHITLBridge(websocket_url=ws_url, websocket_api_key=ws_key)
             
             # Non-blocking: directly send the approval request envelope
             envelope = {
