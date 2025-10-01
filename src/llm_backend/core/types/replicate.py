@@ -35,6 +35,8 @@ class ExampleInput(BaseModel):
     video_file: Optional[str] = None
     attachments: Optional[List[str]] = None
     hitl_edits: Optional[Dict[str, Any]] = None  # HITL human edits to integrate
+    schema_metadata: Optional[Dict[str, Any]] = None  # Example input schema hints
+    hitl_field_metadata: Optional[Dict[str, Any]] = None  # Alias/collection hints for edits
 
 class InformationInputResponse(BaseModel):
     continue_run: bool

@@ -30,6 +30,97 @@ class ReplicateProvider(AIProvider):
         self.description = config.get("description", "")
         self.latest_version = config.get("latest_version", "")
         self.model_name = config.get("name", "")
+        self.field_metadata = self._build_field_metadata()
+        self.hitl_alias_metadata = self._build_hitl_alias_metadata(self.field_metadata)
+    
+    def _build_field_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Derive lightweight schema metadata from the example input."""
+        metadata: Dict[str, Dict[str, Any]] = {}
+        if not isinstance(self.example_input, dict):
+            return metadata
+
+        for field, value in self.example_input.items():
+            field_meta: Dict[str, Any] = {
+                "type": type(value).__name__,
+                "collection": isinstance(value, (list, tuple)),
+            }
+
+            if isinstance(value, (list, tuple)) and value:
+                field_meta["item_type"] = type(value[0]).__name__
+            if isinstance(value, dict):
+                field_meta["nested_keys"] = list(value.keys())
+
+            metadata[field] = field_meta
+
+        return metadata
+
+    def _build_hitl_alias_metadata(self, field_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Create alias metadata that captures collection/dict hints for HITL edits."""
+        base_aliases: Dict[str, List[str]] = {
+            "input_image": ["input_image", "source_image", "image", "image_url", "image_input"],
+            "source_image": ["source_image", "input_image", "image", "image_url"],
+            "image": ["image", "input_image", "source_image", "image_url", "image_input"],
+            "driven_audio": ["driven_audio", "audio_file", "audio"],
+            "audio_file": ["audio_file", "driven_audio", "audio"],
+            "prompt": ["prompt", "text", "instruction", "input"],
+            "instruction": ["instruction", "prompt", "text"],
+        }
+
+        alias_metadata: Dict[str, Dict[str, Any]] = {}
+
+        def collection_hint(target: str) -> bool:
+            return field_metadata.get(target, {}).get("collection", False)
+
+        def dict_hint(target: str) -> bool:
+            return field_metadata.get(target, {}).get("type") == "dict"
+
+        for alias_key, targets in base_aliases.items():
+            alias_metadata[alias_key] = {
+                "targets": targets,
+                "collection": any(collection_hint(t) for t in targets),
+                "dict": any(dict_hint(t) for t in targets),
+            }
+
+        for field, meta in field_metadata.items():
+            alias_metadata.setdefault(field, {
+                "targets": [field],
+                "collection": meta.get("collection", False),
+                "dict": meta.get("type") == "dict",
+            })
+
+            # Provide generic aliases for multi-valued media fields
+            if meta.get("collection") and "image" in field.lower():
+                alias_metadata.setdefault("image_input", {
+                    "targets": [field, "image_input"],
+                    "collection": True,
+                    "dict": False,
+                })
+
+        return alias_metadata
+
+    def _coerce_payload_to_schema(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure payload fields align with the inferred schema metadata."""
+        if not payload:
+            return payload
+
+        coerced = payload.copy()
+        for field, meta in self.field_metadata.items():
+            if field not in coerced:
+                continue
+
+            value = coerced[field]
+
+            if meta.get("collection") and not isinstance(value, (list, tuple)):
+                coerced[field] = [value]
+                continue
+
+            if meta.get("type") == "dict" and isinstance(value, dict):
+                continue
+
+            if meta.get("type") == "dict" and not isinstance(value, dict):
+                coerced[field] = {"value": value}
+
+        return coerced
     
     def get_capabilities(self) -> ProviderCapabilities:
         """Return Replicate model capabilities"""
@@ -62,7 +153,9 @@ class ReplicateProvider(AIProvider):
                 "example_input": self.example_input,
                 "description": self.description,
                 "latest_version": self.latest_version,
-                "model_name": self.model_name
+                "model_name": self.model_name,
+                "field_metadata": self.field_metadata,
+                "hitl_alias_metadata": self.hitl_alias_metadata,
             },
             run_input=self.run_input,
             hitl_enabled=True  # Enable intelligent mapping
@@ -74,7 +167,9 @@ class ReplicateProvider(AIProvider):
             example_input=self.example_input,
             description=self.description,
             image_file=attachments[0] if attachments else None,
-            hitl_edits=hitl_edits  # Pass HITL edits for intelligent integration
+            hitl_edits=hitl_edits,  # Pass HITL edits for intelligent integration
+            schema_metadata=self.field_metadata,
+            hitl_field_metadata=self.hitl_alias_metadata,
         )
         
         # Use AI agent as primary logic for intelligent payload creation
@@ -113,12 +208,13 @@ class ReplicateProvider(AIProvider):
                 "original_example": self.example_input,
                 "agent_generated": True,
                 "agent_messages": getattr(agent_payload, "messages", None),
-                "hitl_applied": bool(hitl_edits)
+                "hitl_applied": bool(hitl_edits),
+                "schema_metadata": self.field_metadata,
             }
 
             return ReplicatePayload(
                 provider_name="replicate",
-                input=agent_input_payload,
+                input=self._coerce_payload_to_schema(agent_input_payload),
                 operation_type=operation_type,
                 model_version=self.latest_version,
                 metadata=metadata
@@ -156,7 +252,7 @@ class ReplicateProvider(AIProvider):
         
         return ReplicatePayload(
             provider_name="replicate",
-            input=input_data,
+            input=self._coerce_payload_to_schema(input_data),
             operation_type=operation_type,
             model_version=self.latest_version,
             metadata={"original_example": self.example_input, "fallback_used": True, "hitl_mapped": bool(hitl_edits)}
@@ -169,32 +265,41 @@ class ReplicateProvider(AIProvider):
 
         updated_input = base_input.copy()
 
-        alias_map = {
-            "input_image": ["input_image", "source_image", "image", "image_url"],
-            "source_image": ["source_image", "input_image", "image", "image_url"],
-            "image": ["image", "input_image", "source_image", "image_url"],
-            "driven_audio": ["driven_audio", "audio_file", "audio"],
-            "audio_file": ["audio_file", "driven_audio", "audio"],
-            "prompt": ["prompt", "text", "instruction", "input"],
-        }
+        example_input = getattr(self, "example_input", {}) or {}
+        alias_metadata = self.hitl_alias_metadata or {}
+
+        def _coerce_collection(target_key: str, new_value: Any) -> Any:
+            """Ensure new_value matches the collection type of the target."""
+            current_value = updated_input.get(target_key, example_input.get(target_key))
+
+            if isinstance(current_value, (list, tuple)):
+                if isinstance(new_value, (list, tuple)):
+                    return list(new_value)
+                return [new_value]
+
+            if isinstance(current_value, dict) and isinstance(new_value, dict):
+                merged = current_value.copy()
+                merged.update(new_value)
+                return merged
+
+            return new_value
 
         for key, value in hitl_edits.items():
             if value in (None, ""):
                 continue
 
-            targets = alias_map.get(key, [key])
+            alias_info = alias_metadata.get(key, {"targets": [key], "collection": False, "dict": False})
+            targets = alias_info.get("targets", [key])
             applied = False
 
             for target in targets:
-                # Apply edits to any matching keys already present in the payload or
-                # defined in the model's example input so placeholder values are overridden.
-                if target in updated_input or (hasattr(self, "example_input") and target in self.example_input):
-                    updated_input[target] = value
+                if target in updated_input or target in example_input:
+                    updated_input[target] = _coerce_collection(target, value)
                     applied = True
 
             if not applied:
                 primary_target = targets[0]
-                updated_input[primary_target] = value
+                updated_input[primary_target] = _coerce_collection(primary_target, value)
 
             print(f"🔧 Applied HITL overlay: {key} -> {value}")
 

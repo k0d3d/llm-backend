@@ -34,6 +34,8 @@ class ReplicateTeam:
         self.description = tool_config.get("description", "")
         self.latest_version = tool_config.get("latest_version", "")
         self.model_name = tool_config.get("model_name", "")
+        self.field_metadata = tool_config.get("field_metadata", {}) or {}
+        self.hitl_alias_metadata = tool_config.get("hitl_alias_metadata", {}) or {}
         self.attachments = self._collect_attachments()
         self.hitl_edits = self._resolve_hitl_edits()
         self.operation_type = self._resolve_operation_type()
@@ -229,6 +231,9 @@ class ReplicateTeam:
                 - Apply any image_file or attachments to relevant image/file fields
                 - Honor any hitl_edits by overriding corresponding fields
                 - Preserve the structure and field names from example_input
+                - Review schema_metadata and hitl_field_metadata to understand which fields are collections
+                  (e.g., image_input arrays) or nested dictionaries, and ensure your payload respects those
+                  data shapes when applying edits
                 - Only include fields that exist in the example_input schema
                 
                 Respond strictly with the AgentPayload schema containing the transformed input.

@@ -158,9 +158,36 @@ class WebSocketHITLBridge:
 
         if not approval_data:
             logger.warning(
-                "Received response for unknown approval: %s", approval_id
+                "Received response for unknown approval: %s. Attempting fallback to run_id.", approval_id
             )
-            return False
+            # Fallback: Try to find the run by run_id from the approval response
+            run_id = approval_response.get("run_id") or approval_response.get("runId")
+            if run_id:
+                try:
+                    # Load the run state directly
+                    state = await self.state_manager.load_state(run_id)
+                    if state:
+                        logger.info(f"Found run {run_id} via fallback, processing approval without approval entry")
+                        # Create synthetic approval_data for processing
+                        approval_data = {
+                            "approval_id": approval_id,
+                            "run_id": run_id,
+                            "checkpoint_type": "unknown",
+                            "context": {},
+                            "user_id": approval_response.get("approved_by"),
+                            "session_id": state.original_input.get("session_id"),
+                            "created_at": datetime.utcnow().isoformat(),
+                            "expires_at": datetime.utcnow().isoformat()
+                        }
+                    else:
+                        logger.error(f"Run {run_id} not found in fallback")
+                        return False
+                except Exception as e:
+                    logger.error(f"Fallback failed: {e}")
+                    return False
+            else:
+                logger.error("No run_id provided in approval response for fallback")
+                return False
         
         # Validate response
         required_fields = ["approval_id", "action", "timestamp"]
@@ -370,7 +397,7 @@ class WebSocketHITLBridge:
 
         return await self.state_manager.list_pending_approvals(user_id)
     
-    async def cancel_approval(self, approval_id: str, reason: str = "Cancelled") -> bool:
+    async def cancel_approval(self, approval_id: str, reason: str = "Cancelled", run_id: Optional[str] = None) -> bool:
         """Cancel a pending approval"""
         
         if not self.state_manager:
@@ -379,7 +406,28 @@ class WebSocketHITLBridge:
             )
 
         approval_data = await self.state_manager.load_pending_approval(approval_id)
-        if not approval_data:
+        
+        # Fallback: If approval not found but run_id provided, try to cancel the run directly
+        if not approval_data and run_id:
+            logger.warning(f"Approval {approval_id} not found, attempting to cancel run {run_id} directly")
+            try:
+                state = await self.state_manager.load_state(run_id)
+                if state:
+                    await self.state_manager.resume_run(run_id, {
+                        "action": "cancelled",
+                        "reason": reason,
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                    logger.info(f"Cancelled run {run_id} via fallback: {reason}")
+                    return True
+                else:
+                    logger.error(f"Run {run_id} not found for cancellation fallback")
+                    return False
+            except Exception as e:
+                logger.error(f"Fallback cancellation failed: {e}")
+                return False
+        elif not approval_data:
+            logger.warning(f"Approval {approval_id} not found and no run_id provided for fallback")
             return False
         
         # Get run_id to update run status

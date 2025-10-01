@@ -259,6 +259,7 @@ async def approve_checkpoint(
         # Process approval through WebSocket bridge
         approval_response = {
             "approval_id": approval.approval_id,
+            "run_id": run_id,  # Include run_id for fallback handling
             "action": approval.action,
             "edits": approval.edits,
             "reason": approval.reason,
@@ -429,7 +430,8 @@ async def cancel_run(run_id: str) -> Dict[str, Any]:
             if approval["run_id"] == run_id:
                 await websocket_bridge.cancel_approval(
                     approval["approval_id"],
-                    "Run cancelled"
+                    "Run cancelled",
+                    run_id=run_id
                 )
         
         return {
