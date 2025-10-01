@@ -5,7 +5,7 @@ Integrates HITL checkpoints with browser feedback via WebSocket messages
 
 import asyncio
 import uuid
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import aiohttp
 import logging
@@ -36,7 +36,6 @@ class WebSocketHITLBridge:
                 "WebSocketHITLBridge initialized without a state_manager; pending approvals "
                 "cannot be persisted. Configure persistent storage to avoid data loss."
             )
-        self.approval_callbacks: Dict[str, Callable] = {}
     
     async def request_human_approval(
         self,
@@ -99,31 +98,12 @@ class WebSocketHITLBridge:
                 "type": "hitl_approval_request",
                 "data": approval_request
             }, user_id, session_id)
-            
-            # Wait for approval response
-            response = await self._wait_for_approval(approval_id)
-            
-            # Resume the run with approval response
-            if self.state_manager:
-                await self.state_manager.resume_run(run_id, response)
-            
-            return response
-            
-        except asyncio.TimeoutError:
-            # Mark run as failed due to timeout
-            if self.state_manager:
-                try:
-                    await self.state_manager.resume_run(run_id, {
-                        "action": "timeout",
-                        "reason": f"Approval request timed out after {self.approval_timeout} seconds",
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                except Exception as e:
-                    logger.error(f"Failed to update run status on timeout: {e}")
-            
-            raise Exception(
-                f"Approval request {approval_id} timed out after {self.approval_timeout} seconds"
-            )
+
+            return approval_request
+
+        except Exception as e:
+            logger.error(f"Failed to dispatch approval request {approval_id}: {e}")
+            raise
     
     async def handle_approval_response(self, approval_response: Dict[str, Any]) -> bool:
         """
@@ -199,30 +179,69 @@ class WebSocketHITLBridge:
         approval_data["response"] = approval_response
         approval_data["responded_at"] = datetime.utcnow().isoformat()
         
-        # Trigger callback if registered
-        if approval_id in self.approval_callbacks:
-            callback = self.approval_callbacks.pop(approval_id)
-            callback(approval_response)
-        
         # Update run status based on action before cleanup
         run_id = approval_data.get("run_id")
         action = approval_response.get("action")
-        
-        if run_id and action in ["reject", "cancelled"]:
+
+        if run_id:
             try:
                 await self.state_manager.resume_run(run_id, {
-                    "action": "rejected" if action == "reject" else "cancelled",
-                    "reason": approval_response.get("reason", "Rejected by user"),
-                    "timestamp": datetime.utcnow().isoformat()
+                    **approval_response,
+                    "action": action,
+                    "timestamp": approval_response.get("timestamp", datetime.utcnow().isoformat())
                 })
-                logger.info(f"Updated run {run_id} status to failed due to {action}")
             except Exception as e:
-                logger.error(f"Failed to update run status on {action}: {e}")
+                logger.error(f"Failed to update run {run_id} with approval response: {e}")
         
         # Clean up from both database and memory
         await self.state_manager.remove_pending_approval(approval_id)
-        
+
         logger.info(f"Processed approval response for {approval_id}: {approval_response['action']}")
+
+        # Kick off orchestrator resume workflow asynchronously
+        if run_id:
+            try:
+                from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
+                from llm_backend.core.hitl.orchestrator import HITLOrchestrator
+                from llm_backend.core.providers.registry import ProviderRegistry
+
+                shared_state_manager = get_shared_state_manager()
+                shared_websocket_bridge = get_shared_websocket_bridge()
+
+                async def _resume_run() -> None:
+                    state = await shared_state_manager.load_state(run_id)
+                    if not state:
+                        logger.warning(f"Cannot resume run {run_id}; state not found")
+                        return
+
+                    agent_config = state.original_input.get("agent_tool_config")
+                    provider_name, provider_config = ProviderRegistry.resolve_provider(agent_config)
+
+                    if not provider_name:
+                        provider_name = state.original_input.get("provider", "replicate")
+                        provider_config = provider_config or state.original_input.get("provider_config", {})
+
+                    provider = ProviderRegistry.get_provider(provider_name, provider_config)
+
+                    orchestrator = HITLOrchestrator(
+                        provider=provider,
+                        config=state.config,
+                        run_input=state.original_input,
+                        state_manager=shared_state_manager,
+                        websocket_bridge=shared_websocket_bridge,
+                    )
+
+                    orchestrator.state = state
+                    try:
+                        await orchestrator.resume_from_state()
+                    except Exception as exec_error:
+                        logger.error(f"Failed to resume run {run_id}: {exec_error}")
+
+                asyncio.create_task(_resume_run())
+
+            except Exception as bootstrap_error:
+                logger.error(f"Failed to bootstrap orchestrator resume for run {run_id}: {bootstrap_error}")
+
         return True
     
     def create_field_schema(
@@ -363,29 +382,6 @@ class WebSocketHITLBridge:
                         
         except Exception as e:
             logger.error(f"Error sending WebSocket message: {e}")
-    
-    async def _wait_for_approval(self, approval_id: str) -> Dict[str, Any]:
-        """Wait for approval response with timeout"""
-        
-        # Create future for approval response
-        future = asyncio.Future()
-        
-        def approval_callback(response):
-            if not future.done():
-                future.set_result(response)
-        
-        # Register callback
-        self.approval_callbacks[approval_id] = approval_callback
-        
-        try:
-            # Wait for response with timeout
-            response = await asyncio.wait_for(future, timeout=self.approval_timeout)
-            return response
-            
-        except asyncio.TimeoutError:
-            # Clean up callback on timeout
-            self.approval_callbacks.pop(approval_id, None)
-            raise
     
     async def list_pending_approvals(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """List pending approvals for a user"""

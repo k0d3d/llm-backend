@@ -1,4 +1,5 @@
 
+import asyncio
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -7,6 +8,8 @@ from pydantic_ai import Agent, ModelRetry, RunContext, Tool
 from llm_backend.core.types.common import MessageType
 from llm_backend.core.types.replicate import (
     AgentPayload,
+    AttachmentDiscoveryContext,
+    AttachmentDiscoveryResult,
     ExampleInput,
     FinalGuardContext,
     FinalGuardDecision,
@@ -36,12 +39,37 @@ class ReplicateTeam:
         self.model_name = tool_config.get("model_name", "")
         self.field_metadata = tool_config.get("field_metadata", {}) or {}
         self.hitl_alias_metadata = tool_config.get("hitl_alias_metadata", {}) or {}
+        self.hitl_edits: Dict[str, Any] = {}
         self.attachments = self._collect_attachments()
-        self.hitl_edits = self._resolve_hitl_edits()
+        resolved_edits = self._resolve_hitl_edits()
+        if resolved_edits:
+            self.hitl_edits.update(resolved_edits)
         self.operation_type = self._resolve_operation_type()
 
+    def _build_text_context(self) -> List[str]:
+        """Gather free-form text sources that might reference attachments."""
+        context_fragments: List[str] = []
+
+        if isinstance(self.prompt, str) and self.prompt:
+            context_fragments.append(self.prompt)
+
+        prompt_doc = getattr(self.run_input, "prompt_document", None)
+        if isinstance(prompt_doc, str) and prompt_doc:
+            context_fragments.append(prompt_doc)
+
+        # Include recent conversation snippets if available
+        conversation = getattr(self.run_input, "conversation", None)
+        if isinstance(conversation, list):
+            for message in conversation[-5:]:
+                if isinstance(message, dict):
+                    text = message.get("content") or message.get("text")
+                    if isinstance(text, str) and text:
+                        context_fragments.append(text)
+
+        return context_fragments
+
     def _collect_attachments(self) -> List[str]:
-        """Gather candidate attachment URLs from run input and tool config."""
+        """Gather candidate attachment URLs from run input and tool config, with AI fallback."""
         attachments: List[str] = []
         sources: List[Dict[str, Any]] = []
 
@@ -72,7 +100,82 @@ class ReplicateTeam:
             if isinstance(last_asset, str) and last_asset and last_asset not in attachments:
                 attachments.append(last_asset)
 
+        # If deterministic harvesting failed, use AI assistant
+        if not attachments and self.hitl_enabled:
+            triage_agent = self._attachment_triage_agent()
+            try:
+                async def run_triage() -> AttachmentDiscoveryResult:
+                    discovery = await triage_agent.run(
+                        "Analyze the provided context and identify any media URLs relevant to the model schema.",
+                        deps=AttachmentDiscoveryContext(
+                            prompt=self.prompt,
+                            text_context=self._build_text_context(),
+                            candidate_urls=[],
+                            schema_metadata=self.field_metadata,
+                            hitl_field_metadata=self.hitl_alias_metadata,
+                            expected_media_fields=[field for field, meta in self.field_metadata.items() if meta.get("collection") or "image" in field.lower() or "audio" in field.lower()],
+                        ),
+                    )
+                    return getattr(discovery, "output", None)
+
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(lambda: asyncio.run(run_triage()))
+                        result = future.result()
+                else:
+                    result = asyncio.run(run_triage())
+
+                if isinstance(result, AttachmentDiscoveryResult):
+                    attachments = list(dict.fromkeys(result.attachments or []))
+                    if result.mapping:
+                        # Merge mapping into hitl edits so downstream consumers see structured assignments
+                        for target, url in result.mapping.items():
+                            if isinstance(target, str) and url:
+                                self.hitl_edits[target] = url
+            except Exception as triage_error:
+                print(f"⚠️ Attachment triage agent failed: {triage_error}")
+
         return attachments
+
+    def _attachment_triage_agent(self) -> Agent:
+        """Agent that inspects prompt/context to discover potential attachments."""
+
+        def gather_context(ctx: RunContext[AttachmentDiscoveryContext]) -> Dict[str, Any]:
+            return {
+                "prompt": ctx.deps.prompt,
+                "text_context": ctx.deps.text_context,
+                "candidate_urls": ctx.deps.candidate_urls,
+                "schema_metadata": ctx.deps.schema_metadata,
+                "hitl_field_metadata": ctx.deps.hitl_field_metadata,
+                "expected_media_fields": ctx.deps.expected_media_fields,
+            }
+
+        agent = Agent(
+            "openai:gpt-4o",
+            deps_type=AttachmentDiscoveryContext,
+            output_type=AttachmentDiscoveryResult,
+            system_prompt=(
+                """
+                You are an Attachment Discovery Agent. Review the provided prompt and surrounding text context
+                to find URLs or asset references that should be used as model inputs. Determine the most relevant
+                assets for the model, considering the schema metadata and expected media fields.
+
+                Respond strictly with the AttachmentDiscoveryResult schema, providing a list of attachment URLs.
+                Include reasoning when helpful.
+                """
+            ),
+            tools=[
+                Tool(
+                    gather_context,
+                    takes_ctx=True,
+                    description="Inspect prompt and context snippets to assist in attachment discovery."
+                )
+            ],
+        )
+
+        return agent
 
     def _resolve_hitl_edits(self) -> Dict[str, Any]:
         """Merge human edits from tool config, run input metadata, and orchestrator state."""

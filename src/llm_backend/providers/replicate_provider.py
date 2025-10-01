@@ -121,6 +121,47 @@ class ReplicateProvider(AIProvider):
                 coerced[field] = {"value": value}
 
         return coerced
+
+    def _filter_payload_to_schema(
+        self,
+        payload: Dict[str, Any],
+        schema: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Strip payload fields that are not present in the example_input schema."""
+
+        if not isinstance(payload, dict):
+            return payload
+
+        schema = schema if schema is not None else self.example_input
+        if not isinstance(schema, dict):
+            return payload
+
+        filtered: Dict[str, Any] = {}
+
+        for field, schema_value in schema.items():
+            if field not in payload:
+                continue
+
+            value = payload[field]
+
+            if isinstance(schema_value, dict) and isinstance(value, dict):
+                filtered[field] = self._filter_payload_to_schema(value, schema_value)
+            elif isinstance(schema_value, list):
+                normalized_list = value if isinstance(value, list) else [value]
+
+                if schema_value and isinstance(schema_value[0], dict):
+                    filtered[field] = [
+                        self._filter_payload_to_schema(item, schema_value[0])
+                        if isinstance(item, dict)
+                        else item
+                        for item in normalized_list
+                    ]
+                else:
+                    filtered[field] = normalized_list
+            else:
+                filtered[field] = value
+
+        return filtered
     
     def get_capabilities(self) -> ProviderCapabilities:
         """Return Replicate model capabilities"""
@@ -143,7 +184,7 @@ class ReplicateProvider(AIProvider):
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
         import asyncio
-        
+
         if self.run_input is None:
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
@@ -160,19 +201,18 @@ class ReplicateProvider(AIProvider):
             run_input=self.run_input,
             hitl_enabled=True  # Enable intelligent mapping
         )
-        
-        # Prepare agent input with HITL edits
+
         agent_input = ExampleInput(
             prompt=prompt,
             example_input=self.example_input,
             description=self.description,
+            attachments=attachments or None,
             image_file=attachments[0] if attachments else None,
-            hitl_edits=hitl_edits,  # Pass HITL edits for intelligent integration
+            hitl_edits=hitl_edits,
             schema_metadata=self.field_metadata,
             hitl_field_metadata=self.hitl_alias_metadata,
         )
-        
-        # Use AI agent as primary logic for intelligent payload creation
+
         try:
             replicate_agent = replicate_team.replicate_agent()
 
@@ -186,7 +226,6 @@ class ReplicateProvider(AIProvider):
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import concurrent.futures
-
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(lambda: asyncio.run(run_agent()))
                     agent_payload = future.result()
@@ -198,9 +237,15 @@ class ReplicateProvider(AIProvider):
                 raise ValueError("Agent did not return an output payload")
 
             agent_input_payload = agent_output.input.model_dump()
-
             if hitl_edits:
                 agent_input_payload = self._apply_hitl_edits(agent_input_payload, hitl_edits)
+
+            prompt_targets = ["prompt", "text", "input", "instruction", "query"]
+            for target in prompt_targets:
+                if target in agent_input_payload or target in self.example_input:
+                    agent_input_payload[target] = prompt
+
+            agent_input_payload = self._filter_payload_to_schema(agent_input_payload)
 
             print(f"🤖 Agent created payload: {agent_input_payload}")
 
@@ -217,7 +262,7 @@ class ReplicateProvider(AIProvider):
                 input=self._coerce_payload_to_schema(agent_input_payload),
                 operation_type=operation_type,
                 model_version=self.latest_version,
-                metadata=metadata
+                metadata=metadata,
             )
 
         except Exception as e:
@@ -227,35 +272,36 @@ class ReplicateProvider(AIProvider):
             print(f"🔍 Full traceback: {traceback.format_exc()}")
             print("🔧 Falling back to static mapping")
 
-        print(f"🔧 Using enhanced fallback mapping with HITL edits: {hitl_edits}")
-
-        # Fallback to static mapping if agent fails
         input_data = self._apply_hitl_edits(self.example_input.copy(), hitl_edits)
-        
-        # Map prompt to appropriate field
+
         prompt_fields = ["prompt", "text", "input", "query", "instruction"]
         for field in prompt_fields:
             if field in input_data:
                 input_data[field] = prompt
                 break
-        
-        # Map attachments to appropriate fields (only if no HITL edits provided)
+
         if attachments and not hitl_edits:
             image_fields = [
-                "image", "image_url", "input_image", "first_frame_image", 
+                "image", "image_url", "input_image", "first_frame_image",
                 "subject_reference", "start_image", "init_image"
             ]
             for field in image_fields:
                 if field in input_data and attachments:
                     input_data[field] = attachments[0]
                     break
-        
+
+        input_data = self._filter_payload_to_schema(input_data)
+
         return ReplicatePayload(
             provider_name="replicate",
             input=self._coerce_payload_to_schema(input_data),
             operation_type=operation_type,
             model_version=self.latest_version,
-            metadata={"original_example": self.example_input, "fallback_used": True, "hitl_mapped": bool(hitl_edits)}
+            metadata={
+                "original_example": self.example_input,
+                "fallback_used": True,
+                "hitl_mapped": bool(hitl_edits),
+            },
         )
 
     def _apply_hitl_edits(self, base_input: Dict[str, Any], hitl_edits: Optional[Dict[str, Any]]) -> Dict[str, Any]:

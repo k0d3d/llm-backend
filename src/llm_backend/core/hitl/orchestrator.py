@@ -5,8 +5,9 @@ HITL Orchestrator - Main workflow coordinator
 import time
 import uuid
 import os
+import re
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable, List
 
 from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLPolicy
 from .websocket_bridge import WebSocketHITLBridge
@@ -91,7 +92,7 @@ class HITLOrchestrator:
                             print(f"🔍 Found human edit in suggested_payload.input: {field} = {suggested['input'][field]}")
         
         if not human_edits:
-            print(f"🔍 No human edits found anywhere. state.human_edits: {getattr(self.state, 'human_edits', 'MISSING')}, last_approval: {getattr(self.state, 'last_approval', 'MISSING')}")
+            # print(f"🔍 No human edits found anywhere. state.human_edits: {getattr(self.state, 'human_edits', 'MISSING')}, last_approval: {getattr(self.state, 'last_approval', 'MISSING')}")
             return None
         
         print(f"🔍 Collected human edits: {human_edits}")
@@ -203,37 +204,57 @@ class HITLOrchestrator:
         start_time = time.time()
         
         try:
-            # Step 1: Information Review
-            result = await self._step_information_review()
-            # print(f"✅ Information Review result: {result}")
-            if self._is_paused(result):
-                print("⏸️ Execution paused at Information Review")
-                return result
-            
-            # Step 2: Payload Review
-            result = await self._step_payload_review()
-            if self._is_paused(result):
-                print("⏸️ Execution paused at Payload Review")
-                return result
-            
-            # Step 3: API Execution
-            result = await self._step_api_execution()
-            if self._is_paused(result):
-                print("⏸️ Execution paused at API Execution")
-                return result
-            
-            # Step 4: Response Review
-            result = await self._step_response_review()
-            if self._is_paused(result):
-                return result
-            
-            # Step 5: Completion
-            return await self._step_completion()
-            
+            return await self._run_pipeline(start_index=0)
         except Exception as e:
             return await self._handle_error(e)
         finally:
             self.state.total_execution_time_ms = int((time.time() - start_time) * 1000)
+
+    async def resume_from_state(self) -> Dict[str, Any]:
+        """Resume execution from the current step recorded in state."""
+        print(f"🔁 Resuming HITL run {self.run_id} from step {self.state.current_step}")
+        start_time = time.time()
+
+        try:
+            resume_index = self._determine_resume_index()
+            return await self._run_pipeline(start_index=resume_index)
+        except Exception as e:
+            return await self._handle_error(e)
+        finally:
+            self.state.total_execution_time_ms = int((time.time() - start_time) * 1000)
+
+    def _get_step_pipeline(self) -> List[Callable[[], Dict[str, Any]]]:
+        return [
+            (HITLStep.INFORMATION_REVIEW, self._step_information_review),
+            (HITLStep.PAYLOAD_REVIEW, self._step_payload_review),
+            (HITLStep.API_CALL, self._step_api_execution),
+            (HITLStep.RESPONSE_REVIEW, self._step_response_review),
+        ]
+
+    def _determine_resume_index(self) -> int:
+        pipeline = self._get_step_pipeline()
+        current_step = self.state.current_step or HITLStep.INFORMATION_REVIEW
+
+        for idx, (step, _) in enumerate(pipeline):
+            if step == current_step:
+                # Move to next step after the one we paused at
+                return min(idx + 1, len(pipeline))
+
+        return 0
+
+    async def _run_pipeline(self, start_index: int = 0) -> Dict[str, Any]:
+        pipeline = self._get_step_pipeline()
+
+        result: Dict[str, Any] = {"continue": True}
+
+        for idx in range(start_index, len(pipeline)):
+            step, handler = pipeline[idx]
+            result = await handler()
+            if self._is_paused(result):
+                print(f"⏸️ Execution paused at {step.value}")
+                return result
+
+        return await self._step_completion()
     
     async def _send_websocket_message(self, message: Dict[str, Any]) -> None:
         """Send HITL message via WebSocket bridge (non-blocking notification)."""
@@ -872,13 +893,70 @@ class HITLOrchestrator:
     def _gather_attachments(self) -> list:
         """Gather attachments from available sources.
 
-        Currently sources assets from recent chat history for this session/user.
-        """
-        attachments = []
+        Combines chat history discovery, run input metadata, HITL edits,
+        and URLs embedded in the prompt."""
+
+        attachments: List[str] = []
+
+        def add_attachment(value: Any):
+            if isinstance(value, str):
+                candidate = value.strip()
+                if candidate and candidate not in attachments:
+                    attachments.append(candidate)
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    add_attachment(item)
+
         # Discover attachments from chat history (placeholder implementation)
         history_assets = self._attachments_from_chat_history()
-        if history_assets:
-            attachments.extend(history_assets)
+        add_attachment(history_assets)
+
+        # Attachments explicitly supplied on run input
+        run_input_attachments = getattr(self.run_input, "attachments", None)
+        add_attachment(run_input_attachments)
+
+        # Attachments from agent tool configuration (including nested payloads)
+        agent_tool_config = getattr(self.run_input, "agent_tool_config", {}) or {}
+
+        def collect_from_config(config: Any):
+            if isinstance(config, dict):
+                for key, value in config.items():
+                    if key in {
+                        "attachments",
+                        "attachment_urls",
+                        "images",
+                        "image_urls",
+                        "image_input",
+                        "input_image",
+                        "source_image",
+                        "image",
+                        "media",
+                        "media_urls",
+                        "file",
+                        "file_input",
+                    }:
+                        add_attachment(value)
+                    collect_from_config(value)
+            elif isinstance(config, (list, tuple, set)):
+                for item in config:
+                    collect_from_config(item)
+
+        collect_from_config(agent_tool_config)
+
+        # Attachments derived from human edits (e.g., manual overrides)
+        hitl_edits = self._collect_hitl_edits()
+        if hitl_edits:
+            add_attachment(hitl_edits.values())
+
+        # Parse URLs embedded directly inside the prompt text
+        prompt_text = getattr(self.run_input, "prompt", "")
+        if isinstance(prompt_text, str) and prompt_text:
+            for match in re.findall(r"https?://\S+", prompt_text):
+                cleaned = match.rstrip(')>,.;\'"')
+                add_attachment(cleaned)
+
+        if attachments:
+            print(f"🔗 Gathered attachments for run {self.run_id}: {attachments}")
 
         return attachments
 

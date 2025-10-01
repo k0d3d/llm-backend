@@ -38,6 +38,21 @@ class ExampleInput(BaseModel):
     schema_metadata: Optional[Dict[str, Any]] = None  # Example input schema hints
     hitl_field_metadata: Optional[Dict[str, Any]] = None  # Alias/collection hints for edits
 
+
+class AttachmentDiscoveryContext(BaseModel):
+    prompt: str
+    text_context: List[str] = []
+    candidate_urls: List[str] = []
+    schema_metadata: Dict[str, Any] = {}
+    hitl_field_metadata: Dict[str, Any] = {}
+    expected_media_fields: List[str] = []
+
+
+class AttachmentDiscoveryResult(BaseModel):
+    attachments: List[str]
+    mapping: Optional[Dict[str, str]] = None
+    reasoning: Optional[str] = None
+
 class InformationInputResponse(BaseModel):
     continue_run: bool
     response_information: str
