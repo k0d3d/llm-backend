@@ -186,7 +186,9 @@ class ReplicateProvider(AIProvider):
             applied = False
 
             for target in targets:
-                if target in updated_input:
+                # Apply edits to any matching keys already present in the payload or
+                # defined in the model's example input so placeholder values are overridden.
+                if target in updated_input or (hasattr(self, "example_input") and target in self.example_input):
                     updated_input[target] = value
                     applied = True
 

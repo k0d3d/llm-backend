@@ -368,8 +368,8 @@ class HITLOrchestrator:
                     )
                     return {"continue": True, "approval": approval_response}
                 else:
-                    print("⚠️ No websocket_bridge available, falling back to direct message")
-                    await self._send_websocket_message(pause_response)
+                    print("⚠️ No websocket_bridge available, cannot request approval")
+                    raise Exception("WebSocket bridge is required for HITL approval requests")
             except Exception as ws_error:
                 print(f"❌ WebSocket notification failed: {ws_error}")
             return pause_response

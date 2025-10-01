@@ -452,7 +452,7 @@ class DatabaseStateStore(HITLStateStore):
             action = approval_response.get("action", "approve")
             
             # Handle different actions
-            if action in ["timeout", "cancelled"]:
+            if action in ["timeout", "cancelled", "reject", "rejected"]:
                 state.status = HITLStatus.FAILED
                 print(f"✅ DatabaseStateStore: Marked run {run_id} as failed due to {action}")
             else:
@@ -591,11 +591,8 @@ class DatabaseStateStore(HITLStateStore):
         """Save pending approval to database"""
         session = self.SessionLocal()
         try:
-            logger.debug("Saving pending approval", extra={
-                "approval_id": approval_data['approval_id'],
-                "run_id": approval_data['run_id'],
-                "checkpoint_type": approval_data['checkpoint_type']
-            })
+            logger.info(f"💾 Saving pending approval: {approval_data['approval_id']} for run {approval_data['run_id']}")
+            print(f"💾 Saving pending approval: {approval_data['approval_id']} for run {approval_data['run_id']}")
             pending_approval = HITLPendingApproval(
                 approval_id=approval_data['approval_id'],
                 run_id=_uuid_value(approval_data['run_id']),
@@ -618,12 +615,14 @@ class DatabaseStateStore(HITLStateStore):
         """Load pending approval from database"""
         session = self.SessionLocal()
         try:
+            print(f"🔍 Loading pending approval: {approval_id}")
             approval = session.query(HITLPendingApproval).filter(
                 HITLPendingApproval.approval_id == approval_id,
                 HITLPendingApproval.status == 'pending'
             ).first()
             
             if approval:
+                print(f"✅ Found pending approval: {approval_id}")
                 return {
                     'approval_id': approval.approval_id,
                     'run_id': approval.run_id,
@@ -634,6 +633,14 @@ class DatabaseStateStore(HITLStateStore):
                     'created_at': approval.created_at.isoformat(),
                     'expires_at': approval.expires_at.isoformat()
                 }
+            else:
+                print(f"❌ No pending approval found for: {approval_id}")
+                # Check if approval exists with different status
+                all_approvals = session.query(HITLPendingApproval).filter(
+                    HITLPendingApproval.approval_id == approval_id
+                ).all()
+                for appr in all_approvals:
+                    print(f"   Found approval {approval_id} with status: {appr.status}")
             return None
         finally:
             session.close()

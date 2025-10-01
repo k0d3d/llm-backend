@@ -177,6 +177,21 @@ class WebSocketHITLBridge:
             callback = self.approval_callbacks.pop(approval_id)
             callback(approval_response)
         
+        # Update run status based on action before cleanup
+        run_id = approval_data.get("run_id")
+        action = approval_response.get("action")
+        
+        if run_id and action in ["reject", "cancelled"]:
+            try:
+                await self.state_manager.resume_run(run_id, {
+                    "action": "rejected" if action == "reject" else "cancelled",
+                    "reason": approval_response.get("reason", "Rejected by user"),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                logger.info(f"Updated run {run_id} status to failed due to {action}")
+            except Exception as e:
+                logger.error(f"Failed to update run status on {action}: {e}")
+        
         # Clean up from both database and memory
         await self.state_manager.remove_pending_approval(approval_id)
         

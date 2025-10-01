@@ -148,8 +148,7 @@ async def start_hitl_run(
         
         # Execute run asynchronously
         background_tasks.add_task(
-            orchestrator.execute_run,
-            run_id
+            orchestrator.execute
         )
         
         return HITLRunResponse(
