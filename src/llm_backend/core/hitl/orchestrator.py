@@ -619,7 +619,12 @@ class HITLOrchestrator:
         self._transition_to_step(HITLStep.RESPONSE_REVIEW)
         
         # Audit response
-        response_dict = {"raw_response": self.state.raw_response, "processed_response": self.state.processed_response}
+        response_dict = {
+            "raw_response": self.state.raw_response,
+            "processed_response": self.state.processed_response,
+            "metadata": {},
+            "execution_time_ms": self.state.provider_execution_time_ms or 0
+        }
         response = ProviderResponse(**response_dict)
         audited_response = self.provider.audit_response(response)
         
