@@ -3,6 +3,7 @@ HITL Orchestrator - Main workflow coordinator
 """
 
 import time
+import asyncio
 import uuid
 import os
 import re
@@ -12,7 +13,7 @@ from typing import Dict, Any, Optional, Callable, List
 from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLPolicy
 from .websocket_bridge import WebSocketHITLBridge
 from .validation import HITLValidator, create_hitl_validation_summary
-from llm_backend.core.providers.base import AIProvider, ProviderResponse
+from llm_backend.core.providers.base import AIProvider, ProviderResponse, AttributeDict
 from llm_backend.core.types.common import RunInput
 
 
@@ -22,7 +23,7 @@ class HITLOrchestrator:
     def __init__(self, provider: AIProvider, config: HITLConfig, run_input: RunInput, state_manager=None, websocket_bridge=None):
         self.provider = provider
         self.config = config
-        self.run_input = run_input
+        self.run_input = self._normalize_run_input(run_input)
         self.run_id = str(uuid.uuid4())
         self.state_manager = state_manager
         self.websocket_bridge = websocket_bridge
@@ -35,13 +36,13 @@ class HITLOrchestrator:
         print(f"   - provider: {provider.__class__.__name__ if provider else 'None'}")
         
         # Set provider run input
-        self.provider.set_run_input(run_input)
+        self.provider.set_run_input(self.run_input)
         
         # Initialize state
         self.state = HITLState(
             run_id=self.run_id,
             config=config,
-            original_input=run_input.model_dump() if hasattr(run_input, 'model_dump') else run_input
+            original_input=self.run_input.model_dump() if hasattr(self.run_input, 'model_dump') else dict(self.run_input)
         )
 
         # Track human edits across checkpoints
@@ -54,6 +55,29 @@ class HITLOrchestrator:
         
         self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
     
+    def _normalize_run_input(self, run_input):
+        """Ensure run_input is a structured object with attribute access."""
+        if run_input is None:
+            return AttributeDict()
+
+        if hasattr(run_input, "model_dump"):
+            return run_input
+
+        if isinstance(run_input, dict):
+            try:
+                return RunInput(**run_input)
+            except Exception:
+                return AttributeDict(run_input)
+
+        if isinstance(run_input, AttributeDict):
+            return run_input
+
+        # Fallback: wrap objects lacking attribute access but convertible to dict
+        try:
+            return AttributeDict(dict(run_input))
+        except Exception:
+            return AttributeDict()
+
     def _collect_hitl_edits(self) -> Optional[Dict[str, Any]]:
         """Collect all human edits from state"""
         # Check multiple sources for human edits
@@ -342,7 +366,13 @@ class HITLOrchestrator:
         
         # Check if human review is required based on validation or capabilities
         blocking_issues = validation_summary["blocking_issues"] > 0
-        needs_review = self._should_pause_at_information_review(capabilities) or blocking_issues
+        
+        # Only pause if there are blocking issues OR policy requires human review
+        # Skip confidence-based pausing when there are no validation issues
+        if blocking_issues:
+            needs_review = True
+        else:
+            needs_review = self._should_pause_at_information_review(capabilities)
         
         print(f"🤔 Needs review? {needs_review} (blocking_issues: {blocking_issues})")
 
@@ -413,6 +443,9 @@ class HITLOrchestrator:
                 config=self.run_input.agent_tool_config or {},
                 hitl_edits=hitl_edits or None
             )
+
+            if asyncio.iscoroutine(payload):
+                payload = await payload
             
             # Validate payload with enhanced validation
             validation_issues = self.provider.validate_payload(
@@ -501,6 +534,9 @@ class HITLOrchestrator:
             config=self.run_input.agent_tool_config or {},
             hitl_edits=hitl_edits or None
         )
+
+        if asyncio.iscoroutine(payload):
+            payload = await payload
         
         # Note: HITL edits are now handled by the intelligent agent in create_payload()
         # This eliminates the need for manual field mapping and override logic

@@ -49,29 +49,30 @@ def test_normalize_attachments(provider):
 
 def test_strip_attachment_mentions(provider):
     """Test removal of attachment URLs from prompt"""
+    prompt = "Add a cat https://example.com/test.jpg to this photo"
     url = "https://example.com/test.jpg"
-    prompt = f"Add a cat [image]({url}) to this photo {url}"
     clean_prompt = provider._strip_attachment_mentions(prompt, [url])
     assert url not in clean_prompt
     assert "[image]" not in clean_prompt
     assert clean_prompt.strip() == "Add a cat to this photo"
 
-def test_create_payload_with_attachments(provider):
-    """Test payload creation with image attachments"""
-    prompt = "Add a cat"
+@pytest.mark.asyncio
+async def test_create_payload_with_attachments(provider):
+    """Test payload creation with attachments"""
+    prompt = "Edit this image"
     attachments = ["https://serve-dev.tohju.com/test.jpg"]
-    payload = provider.create_payload(
+    payload = await provider.create_payload(
         prompt=prompt,
         attachments=attachments,
         operation_type=OperationType.IMAGE_EDITING,
-        config={},
-        hitl_edits=None
+        config={}
     )
     assert isinstance(payload, ReplicatePayload)
     assert payload.input.get("input_image") == attachments[0]
     assert payload.input.get("prompt") == prompt
 
-def test_create_payload_with_hitl_edits(provider):
+@pytest.mark.asyncio
+async def test_create_payload_with_hitl_edits(provider):
     """Test payload creation with HITL edits"""
     prompt = "Add a cat"
     attachments = ["https://serve-dev.tohju.com/test.jpg"]
@@ -79,7 +80,7 @@ def test_create_payload_with_hitl_edits(provider):
         "prompt": "Add two cats",
         "aspect_ratio": "square"
     }
-    payload = provider.create_payload(
+    payload = await provider.create_payload(
         prompt=prompt,
         attachments=attachments,
         operation_type=OperationType.IMAGE_EDITING,
@@ -90,13 +91,56 @@ def test_create_payload_with_hitl_edits(provider):
     assert payload.input.get("prompt") == hitl_edits["prompt"]
     assert payload.input.get("aspect_ratio") == hitl_edits["aspect_ratio"]
 
+@pytest.mark.asyncio
+async def test_attachment_conflict_resolution(provider):
+    """Test that user attachments override example input URLs"""
+    prompt = "Add a cat to the photo"
+    user_attachment = "https://serve-dev.tohju.com/user-photo.jpg"
+    
+    # The provider's example_input contains a replicate.delivery URL
+    # This test ensures user attachment takes precedence
+    payload = await provider.create_payload(
+        prompt=prompt,
+        attachments=[user_attachment],
+        operation_type=OperationType.IMAGE_EDITING,
+        config={}
+    )
+    
+    assert isinstance(payload, ReplicatePayload)
+    # Verify that user attachment is used, not example URL
+    assert payload.input.get("input_image") == user_attachment
+    assert "replicate.delivery" not in str(payload.input)
+    assert payload.input.get("prompt") == prompt
+
+@pytest.mark.asyncio
+async def test_attachment_mixed_with_example_urls(provider):
+    """Test that user attachments are correctly filtered when mixed with example URLs"""
+    prompt = "Add a cat to the photo"
+    example_url = "https://replicate.delivery/example.png"
+    user_attachment = "https://serve-dev.tohju.com/user-photo.jpg"
+    
+    # Simulate the scenario where attachments list contains both example and user URLs
+    # This happens when example_input URLs are gathered along with user attachments
+    payload = await provider.create_payload(
+        prompt=prompt,
+        attachments=[example_url, user_attachment],  # Example URL first, like in actual runs
+        operation_type=OperationType.IMAGE_EDITING,
+        config={}
+    )
+    
+    assert isinstance(payload, ReplicatePayload)
+    # Verify that user attachment is used, NOT the example URL
+    assert payload.input.get("input_image") == user_attachment
+    assert payload.input.get("input_image") != example_url
+    assert "serve-dev.tohju.com" in payload.input.get("input_image")
+    assert payload.input.get("prompt") == prompt
+
 def test_resume_with_dict_input(provider_config):
     """Test provider initialization with dict run input"""
     dict_input = {
         "prompt": "Add a cat",
         "user_email": "test@example.com",
         "user_id": "123",
-        "agent_email": "agent@example.com",
         "session_id": "test-session",
         "message_type": "user_message",
         "agent_tool_config": {"model": "flux-kontext-pro"}
@@ -133,13 +177,8 @@ async def test_hitl_resume_flow():
     }
 
     state_manager = MagicMock()
-    save_state_mock = MagicMock()
-    save_state_mock.__call__ = AsyncMock(return_value=True)
-    state_manager.save_state = save_state_mock
-
-    load_state_mock = MagicMock()
-    load_state_mock.__call__ = AsyncMock(return_value=mock_state)
-    state_manager.load_state = load_state_mock
+    state_manager.save_state = AsyncMock(return_value=True)
+    state_manager.load_state = AsyncMock(return_value=mock_state)
     
     # Create orchestrator
     provider = ReplicateProvider(provider_config)

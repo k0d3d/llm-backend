@@ -213,7 +213,46 @@ class ReplicateProvider(AIProvider):
 
         return clean_prompt.strip()
 
-    def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
+    async def _resolve_attachment_conflicts(self, user_attachments: List[str], payload: Dict[str, Any], prompt: str, example_urls: List[str]) -> Dict[str, Any]:
+        """Use AI agent to resolve conflicts between user attachments and example URLs"""
+        from llm_backend.agents.attachment_resolver import resolve_attachment_conflicts
+        
+        try:
+            result = await resolve_attachment_conflicts(
+                user_attachments=user_attachments,
+                example_input=self.example_input,
+                current_payload=payload,
+                prompt=prompt,
+                example_urls=example_urls
+            )
+            
+            print(f"🤖 Attachment resolver: {result.reasoning}")
+            for change in result.changes_made:
+                print(f"🔧 Attachment change: {change}")
+            
+            return result.resolved_payload
+        except Exception as e:
+            print(f"⚠️ Attachment resolution failed: {e}")
+            # Fallback: manually replace example URLs with user attachments
+            return self._manual_attachment_resolution(user_attachments, payload)
+    
+    def _manual_attachment_resolution(self, user_attachments: List[str], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Manual fallback for attachment resolution"""
+        if not user_attachments:
+            return payload
+            
+        resolved = payload.copy()
+        primary_attachment = user_attachments[0]
+        
+        # Replace any example URLs with user's primary attachment
+        for key, value in resolved.items():
+            if isinstance(value, str) and "replicate.delivery" in value:
+                resolved[key] = primary_attachment
+                print(f"🔧 Manual replacement: {key} -> {primary_attachment}")
+        
+        return resolved
+
+    async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
         """Create Replicate-specific payload using intelligent agent-based field mapping"""
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
@@ -223,7 +262,21 @@ class ReplicateProvider(AIProvider):
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
         normalized_attachments = self._normalize_attachments(attachments or [])
-        primary_attachment = normalized_attachments[0] if normalized_attachments else None
+        
+        # Extract example URLs to filter them out from user attachments
+        example_urls = set()
+        if isinstance(self.example_input, dict):
+            for value in self.example_input.values():
+                if isinstance(value, str) and value.startswith("http"):
+                    example_urls.add(value)
+        
+        # Filter out example URLs to get actual user attachments
+        actual_user_attachments = [url for url in normalized_attachments if url not in example_urls]
+        
+        # Use actual user attachment as primary, fallback to first if none found
+        primary_attachment = (actual_user_attachments[0] if actual_user_attachments 
+                            else (normalized_attachments[0] if normalized_attachments else None))
+        
         clean_prompt = self._strip_attachment_mentions(prompt, normalized_attachments)
 
         example_input_data = deepcopy(self.example_input) if isinstance(self.example_input, dict) else {}
@@ -308,6 +361,19 @@ class ReplicateProvider(AIProvider):
             if hitl_edits:
                 agent_input_payload = self._apply_hitl_edits(agent_input_payload, hitl_edits)
 
+            # Extract example URLs to filter them out from user attachments
+            example_urls = set()
+            if isinstance(self.example_input, dict):
+                for value in self.example_input.values():
+                    if isinstance(value, str) and value.startswith("http"):
+                        example_urls.add(value)
+
+            # Resolve attachment conflicts using AI agent
+            if normalized_attachments:
+                agent_input_payload = await self._resolve_attachment_conflicts(
+                    normalized_attachments, agent_input_payload, prompt, list(example_urls)
+                )
+
             if primary_attachment:
                 attachment_fields = [
                     "input_image",
@@ -346,25 +412,31 @@ class ReplicateProvider(AIProvider):
             print(f"🔍 Full traceback: {traceback.format_exc()}")
             print("🔧 Falling back to static mapping")
 
-        fallback_input = self._apply_hitl_edits(deepcopy(example_input_data), hitl_edits)
-
-        for field in ["prompt", "text", "input", "query", "instruction"]:
-            if field in fallback_input:
-                fallback_input[field] = clean_prompt
-                break
-
-        if primary_attachment and not hitl_edits:
-            fallback_attachment_fields = [
-                "image", "image_url", "input_image", "image_input",
-                "source_image", "first_frame_image", "subject_reference",
-                "start_image", "init_image"
-            ]
-            for field in fallback_attachment_fields:
-                if field in fallback_input:
-                    fallback_input[field] = primary_attachment
+            # Start with example input and set initial prompt
+            fallback_input = deepcopy(example_input_data)
+            prompt_targets = ["prompt", "text", "input", "instruction", "query"]
+            for target in prompt_targets:
+                if target in fallback_input:
+                    fallback_input[target] = clean_prompt
                     break
 
-        fallback_input = self._filter_payload_to_schema(fallback_input)
+            # Apply HITL edits after setting initial values
+            if hitl_edits:
+                fallback_input = self._apply_hitl_edits(fallback_input, hitl_edits)
+
+            # Handle attachments in fallback
+            if primary_attachment:
+                fallback_attachment_fields = [
+                    "image", "image_url", "input_image", "image_input",
+                    "source_image", "first_frame_image", "subject_reference",
+                    "start_image", "init_image"
+                ]
+                for field in fallback_attachment_fields:
+                    if field in fallback_input:
+                        fallback_input[field] = primary_attachment
+                        break
+
+            fallback_input = self._filter_payload_to_schema(fallback_input)
 
         return ReplicatePayload(
             provider_name="replicate",

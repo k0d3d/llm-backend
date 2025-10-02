@@ -4,6 +4,7 @@ Base provider interface and data models for HITL system
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
+from types import SimpleNamespace
 from pydantic import BaseModel
 from enum import Enum
 from datetime import datetime
@@ -81,10 +82,30 @@ class AIProvider(ABC):
             try:
                 self.run_input = RunInput(**run_input)
             except Exception:
-                # If conversion fails, store as-is for backward compatibility
-                self.run_input = run_input
+                # If conversion fails, provide attribute access while preserving dict semantics
+                self.run_input = AttributeDict(run_input)
+                self.run_input_dict = run_input
         else:
             self.run_input = run_input
+
+
+class AttributeDict(dict):
+    """Dictionary with attribute-style access fallback."""
+
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError as exc:
+            raise AttributeError(item) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, item):
+        try:
+            del self[item]
+        except KeyError as exc:
+            raise AttributeError(item) from exc
     
     @abstractmethod
     def get_capabilities(self) -> ProviderCapabilities:
