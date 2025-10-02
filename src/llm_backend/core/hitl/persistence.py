@@ -446,33 +446,35 @@ class DatabaseStateStore(HITLStateStore):
     async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> Optional[HITLState]:
         """Resume a paused run with approval response"""
         state = await self.load_state(run_id)
-        if state:
-            from llm_backend.core.hitl.types import HITLStatus
-            
-            action = approval_response.get("action", "approve")
-            
-            # Handle different actions
-            if action in ["timeout", "cancelled", "reject", "rejected"]:
-                state.status = HITLStatus.FAILED
-                print(f"✅ DatabaseStateStore: Marked run {run_id} as failed due to {action}")
-            else:
-                state.status = HITLStatus.RUNNING
-                print(f"✅ DatabaseStateStore: Resumed run {run_id}")
-            
-            state.updated_at = datetime.utcnow()
-            # Store approval response
-            state.last_approval = approval_response
-            
-            # Apply human edits to state if present in approval response
-            if approval_response.get("edits"):
-                edits = approval_response["edits"]
-                # Store edits in human_edits for persistence
-                for field, value in edits.items():
-                    if field in ["input_image", "source_image", "driven_audio", "audio_file"]:
-                        state.human_edits[field] = value
-                        print(f"🧩 Applied human edit from approval: {field} = {value}")
-            
-            await self.save_state(state)
+        if not state:
+            return None
+
+        from llm_backend.core.hitl.types import HITLStatus
+
+        action = (approval_response or {}).get("action", "approve")
+
+        # Handle different actions
+        if action in ["timeout", "cancelled", "reject", "rejected"]:
+            state.status = HITLStatus.FAILED
+            print(f"✅ DatabaseStateStore: Marked run {run_id} as failed due to {action}")
+        else:
+            state.status = HITLStatus.RUNNING
+            print(f"✅ DatabaseStateStore: Resumed run {run_id}")
+
+        state.updated_at = datetime.utcnow()
+        # Store approval response
+        state.last_approval = approval_response
+
+        # Apply human edits to state if present in approval response
+        if approval_response and approval_response.get("edits"):
+            edits = approval_response["edits"]
+            # Store edits in human_edits for persistence
+            for field, value in edits.items():
+                if field in ["input_image", "source_image", "driven_audio", "audio_file"]:
+                    state.human_edits[field] = value
+                    print(f"🧩 Applied human edit from approval: {field} = {value}")
+
+        await self.save_state(state)
         return state
     
     async def load_state(self, run_id: str) -> Optional[HITLState]:
@@ -925,17 +927,34 @@ class HybridStateManager:
             }
             await self.save_state(state)
     
-    async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> HITLState:
+    async def resume_run(self, run_id: str, approval_response: Dict[str, Any]) -> Optional[HITLState]:
         """Resume run with human approval/edits"""
         state = await self.load_state(run_id)
-        if state:
-            from llm_backend.core.hitl.types import HITLStatus
+        if not state:
+            return None
+
+        from llm_backend.core.hitl.types import HITLStatus
+
+        action = (approval_response or {}).get("action", "approve")
+
+        if action in ["timeout", "cancelled", "reject", "rejected"]:
+            state.status = HITLStatus.FAILED
+        else:
             state.status = HITLStatus.RUNNING
-            state.updated_at = datetime.utcnow()
-            # Store approval response
-            if not hasattr(state, 'last_approval'):
-                state.last_approval = {}
-            state.last_approval = approval_response
-            await self.save_state(state)
-        
+
+        state.updated_at = datetime.utcnow()
+
+        if not hasattr(state, 'last_approval') or state.last_approval is None:
+            state.last_approval = {}
+        state.last_approval = approval_response
+
+        if approval_response and approval_response.get("edits"):
+            edits = approval_response["edits"]
+            if not hasattr(state, 'human_edits') or state.human_edits is None:
+                state.human_edits = {}
+            for field, value in edits.items():
+                state.human_edits[field] = value
+
+        await self.save_state(state)
+
         return state

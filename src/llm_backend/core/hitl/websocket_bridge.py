@@ -11,19 +11,25 @@ import aiohttp
 import logging
 
 from llm_backend.core.hitl.types import HITLStatus
-from llm_backend.core.hitl.persistence import HybridStateManager
+
+try:  # Avoid circular imports at runtime
+    from llm_backend.core.hitl.persistence import HybridStateManager
+except ImportError:  # pragma: no cover - fallback for type checking
+    HybridStateManager = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 
 class WebSocketHITLBridge:
-    """Bridge between HITL orchestrator and WebSocket server for browser communication"""
+    """Bridge between HITL orchestrator and WebSocket server"""
+    
+    _CANCEL_ACTIONS = {"reject", "rejected", "cancel", "cancelled", "timeout"}
     
     def __init__(
         self,
         websocket_url: str,
         websocket_api_key: Optional[str] = None,
-        state_manager: Optional[HybridStateManager] = None,
+        state_manager: Optional["HybridStateManager"] = None,
         approval_timeout: int = 300
     ):
         self.websocket_url = websocket_url
@@ -183,6 +189,8 @@ class WebSocketHITLBridge:
         run_id = approval_data.get("run_id")
         action = approval_response.get("action")
 
+        should_resume = run_id and action not in self._CANCEL_ACTIONS
+
         if run_id:
             try:
                 await self.state_manager.resume_run(run_id, {
@@ -192,14 +200,14 @@ class WebSocketHITLBridge:
                 })
             except Exception as e:
                 logger.error(f"Failed to update run {run_id} with approval response: {e}")
-        
+
         # Clean up from both database and memory
         await self.state_manager.remove_pending_approval(approval_id)
 
         logger.info(f"Processed approval response for {approval_id}: {approval_response['action']}")
 
         # Kick off orchestrator resume workflow asynchronously
-        if run_id:
+        if should_resume:
             try:
                 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
                 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
@@ -344,6 +352,33 @@ class WebSocketHITLBridge:
         
         await self._send_websocket_message(error_message, user_id, session_id)
     
+    async def send_thinking_status(
+        self,
+        message: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None
+    ) -> None:
+        """Send thinking status to indicate processing"""
+        payload = {
+            "status": "thinking",
+            "action": "thinking",
+            "message": message
+        }
+        await self._send_websocket_message(payload, user_id, session_id)
+
+    async def send_done_thinking(
+        self,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None
+    ) -> None:
+        """Send done_thinking status to indicate processing complete"""
+        payload = {
+            "status": "done_thinking",
+            "action": "done_thinking",
+            "message": None
+        }
+        await self._send_websocket_message(payload, user_id, session_id)
+
     async def _send_websocket_message(
         self,
         message: Dict[str, Any],
@@ -359,12 +394,17 @@ class WebSocketHITLBridge:
         # Prepare WebSocket server API request
         api_url = f"{self.websocket_url.replace('wss://', 'https://').replace('ws://', 'http://')}/api/update-status"
         
+        # Extract status and action from message if available, otherwise use defaults
+        status = message.get("status", "hitl_request")
+        action = message.get("action", "approval_required")
+        
         payload = {
             "sessionId": session_id,
             "userId": user_id,
-            "status": "hitl_request",
-            "action": "approval_required",
-            "data": message
+            "status": status,
+            "action": action,
+            "message": message.get("message"),
+            "data": message if message.get("type") else None
         }
         
         headers = {
@@ -378,7 +418,8 @@ class WebSocketHITLBridge:
                     if response.status != 200:
                         logger.error(f"Failed to send WebSocket message: {response.status} - {await response.text()}")
                     else:
-                        logger.debug(f"WebSocket message sent successfully: {message['type']}")
+                        msg_type = message.get('type', message.get('action', 'unknown'))
+                        logger.debug(f"WebSocket message sent successfully: {msg_type}")
                         
         except Exception as e:
             logger.error(f"Error sending WebSocket message: {e}")

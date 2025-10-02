@@ -10,6 +10,14 @@ Note on attachments:
 - The orchestrator no longer reads a single `document_url` field from `RunInput`. Instead, `_gather_attachments()` inspects recent chat history (and other configured sources) for the current `session_id`/`user_id` to assemble a list of candidate assets.
 - If a provider/model requires an attachment and none can be discovered, validation checkpoints surface the missing asset as a blocking issue, pausing the run until the human reviewer uploads or maps the necessary file.
 
+### Auto-Approve Behaviour
+
+- The orchestrator annotates each checkpoint response with `validation_summary.blocking_issues` derived from provider validation.
+- When the value is `0`, the frontend (`HITLValidationCard.tsx`) renders a 10-second auto-approve countdown with “No feedback required” messaging.
+- Any non-zero blocking count cancels auto-approval, exposes the required action list, and requires human intervention.
+- If the human cancels the countdown or rejects, the orchestrator resumes manual flow; approval calls proceed immediately when no blocking items remain.
+- After an approval/reject call succeeds, the card stays in the chat but swaps to an acknowledgement banner so the conversation preserves the audit trail.
+
 ## Class Structure
 
 ### HITLOrchestrator

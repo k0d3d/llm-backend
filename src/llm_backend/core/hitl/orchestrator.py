@@ -270,10 +270,38 @@ class HITLOrchestrator:
         pipeline = self._get_step_pipeline()
 
         result: Dict[str, Any] = {"continue": True}
+        user_id = getattr(self.run_input, 'user_id', None)
+        session_id = getattr(self.run_input, 'session_id', None)
 
         for idx in range(start_index, len(pipeline)):
             step, handler = pipeline[idx]
-            result = await handler()
+
+            # Signal processing start
+            if self.websocket_bridge:
+                await self.websocket_bridge.send_thinking_status(
+                    message=f"Processing {step.value}",
+                    user_id=user_id,
+                    session_id=session_id
+                )
+
+            try:
+                result = await handler()
+            except Exception:
+                if self.websocket_bridge:
+                    await self.websocket_bridge.send_done_thinking(
+                        user_id=user_id,
+                        session_id=session_id
+                    )
+                raise
+            else:
+                if self.websocket_bridge:
+                    should_clear = self._is_paused(result) or step != HITLStep.API_CALL
+                    if should_clear:
+                        await self.websocket_bridge.send_done_thinking(
+                            user_id=user_id,
+                            session_id=session_id
+                        )
+
             if self._is_paused(result):
                 print(f"⏸️ Execution paused at {step.value}")
                 return result
@@ -520,6 +548,16 @@ class HITLOrchestrator:
     async def _step_api_execution(self) -> Dict[str, Any]:
         """API execution step"""
         self._transition_to_step(HITLStep.API_CALL, HITLStatus.RUNNING)
+        user_id = getattr(self.run_input, 'user_id', None)
+        session_id = getattr(self.run_input, 'session_id', None)
+
+        # Signal model execution start
+        if self.websocket_bridge:
+            await self.websocket_bridge.send_thinking_status(
+                message="Running model inference",
+                user_id=user_id,
+                session_id=session_id
+            )
         
         # Get payload from previous step or state
         # Create base payload with HITL edits integration
@@ -552,7 +590,27 @@ class HITLOrchestrator:
         
         if response.error:
             raise Exception(f"Provider execution failed: {response.error}")
+
+        # Don't send done_thinking here - Replicate webhook will handle completion status
+        # The webhook handler elsewhere will send done_thinking when the actual result arrives
+
+        audited_response = self.provider.audit_response(response)
         
+        # Check if human review is required
+        if self._should_pause_at_response_review(response, audited_response):
+            return self._create_pause_response(
+                step=HITLStep.RESPONSE_REVIEW,
+                message="Response requires human review",
+                actions_required=["approve", "edit_response", "retry"],
+                data={
+                    "raw_response": response.raw_response,
+                    "processed_response": response.processed_response,
+                    "audited_response": audited_response,
+                    "quality_score": self._calculate_response_quality(response)
+                }
+            )
+        
+        self.state.final_result = audited_response
         self._add_step_event(HITLStep.API_CALL, HITLStatus.COMPLETED, "system", f"Executed in {execution_time}ms")
         return {"continue": True, "response": response}
     
@@ -561,12 +619,8 @@ class HITLOrchestrator:
         self._transition_to_step(HITLStep.RESPONSE_REVIEW)
         
         # Audit response
-        response = ProviderResponse(
-            raw_response=self.state.raw_response,
-            processed_response=self.state.processed_response,
-            metadata={},
-            execution_time_ms=self.state.provider_execution_time_ms
-        )
+        response_dict = {"raw_response": self.state.raw_response, "processed_response": self.state.processed_response}
+        response = ProviderResponse(**response_dict)
         audited_response = self.provider.audit_response(response)
         
         # Check if human review is required
@@ -995,6 +1049,21 @@ class HITLOrchestrator:
             print(f"🔗 Gathered attachments for run {self.run_id}: {attachments}")
 
         return attachments
+
+    def _calculate_information_confidence(self, capabilities) -> float:
+        """Calculate confidence score for information review step"""
+        # Placeholder implementation - could be enhanced with actual confidence metrics
+        return 0.85
+    
+    def _calculate_response_quality(self, response) -> float:
+        """Calculate quality score for response review step"""
+        # Placeholder implementation - could analyze response content, length, etc.
+        return 0.9
+    
+    def _count_payload_changes(self, payload) -> int:
+        """Count number of changes made to payload from example input"""
+        # Placeholder implementation - could compare against example_input
+        return 0
 
     def _attachments_from_chat_history(self) -> list:
         """Placeholder: discover recent assets (e.g., images) from chat history.

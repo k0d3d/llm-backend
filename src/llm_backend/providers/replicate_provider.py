@@ -211,6 +211,10 @@ class ReplicateProvider(AIProvider):
             # Clean up any double spaces from removals
             clean_prompt = re.sub(r'\s+', ' ', clean_prompt)
 
+        # Strip breadcrumb markers inserted for attachment references
+        clean_prompt = re.sub(r'\s*:->\s*attached document:?\s*', ' ', clean_prompt, flags=re.IGNORECASE)
+        clean_prompt = re.sub(r'""', '"', clean_prompt)
+
         return clean_prompt.strip()
 
     async def _resolve_attachment_conflicts(self, user_attachments: List[str], payload: Dict[str, Any], prompt: str, example_urls: List[str]) -> Dict[str, Any]:
@@ -329,7 +333,7 @@ class ReplicateProvider(AIProvider):
             replicate_agent = replicate_team.replicate_agent()
 
             async def run_agent() -> Any:
-                print(f"🔍 Agent deps: {agent_input.model_dump()}")
+                # print(f"🔍 Agent deps: {agent_input.model_dump()}")
                 return await replicate_agent.run(
                     "Generate an optimal Replicate payload using the provided inputs.",
                     deps=agent_input,

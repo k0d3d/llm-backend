@@ -378,7 +378,14 @@ analytics = await db_store.get_run_analytics()
 - Quality indicators and safety checks
 - Actions: Accept, Edit Text, Retry with Changes
 
-## Observability and Audit
+#### HITL Validation Card (Frontend)
+- Renders in `HITLValidationCard.tsx` inside the chat thread when the orchestrator pauses a run
+- Shows checkpoint metadata, required actions, and contextual validation issues
+- **Auto-approve flow**: When `validation_summary.blocking_issues === 0`, the UI starts a 10-second countdown, displays "No feedback required" messaging, and auto-submits approval when the timer reaches zero.
+- **Human override**: Reviewers can cancel the countdown, trigger immediate approval, or reject/cancel while providing a reason. Canceling stops the timer and surfaces a reminder to review manually.
+- **Persistent acknowledgement**: After any action (approve, cancel, reject) the card remains visible and swaps to a green confirmation banner such as "Thank you for your feedback" instead of disappearing, preserving conversational context for the thread.
+
+### Observability and Audit
 
 ### Logging Strategy
 Log every step with:
