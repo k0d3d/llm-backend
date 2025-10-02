@@ -41,7 +41,7 @@ class HITLOrchestrator:
         self.state = HITLState(
             run_id=self.run_id,
             config=config,
-            original_input=run_input.model_dump()
+            original_input=run_input.model_dump() if hasattr(run_input, 'model_dump') else run_input
         )
 
         # Track human edits across checkpoints
@@ -177,7 +177,7 @@ class HITLOrchestrator:
             self.run_input.session_id = session_id
 
         # Sync state with latest run input values before persistence
-        updated_input = self.run_input.model_dump()
+        updated_input = self.run_input.model_dump() if hasattr(self.run_input, 'model_dump') else self.run_input
         if original_input:
             updated_input.update(original_input)
         self.state.original_input = updated_input

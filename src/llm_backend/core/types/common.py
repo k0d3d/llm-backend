@@ -16,6 +16,17 @@ class RunInput(BaseModel):
     selected_llm: Optional[dict] = None
 
 
+class OperationType(str, Enum):
+    """Types of operations supported by providers"""
+    TEXT_GENERATION = "text_generation"
+    IMAGE_GENERATION = "image_generation"
+    IMAGE_EDITING = "image_editing"
+    VIDEO_GENERATION = "video_generation"
+    AUDIO_GENERATION = "audio_generation"
+    EMBEDDING = "embedding"
+    CLASSIFICATION = "classification"
+
+
 class AgentTools(str, Enum):
     RSSTOOL = "rss-feed-agent-tool"
     WEB3TOOL = "web3-agent-tool"

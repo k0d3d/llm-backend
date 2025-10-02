@@ -72,7 +72,19 @@ class AIProvider(ABC):
     
     def set_run_input(self, run_input):
         """Set run input for provider execution"""
-        self.run_input = run_input
+        # Handle both Pydantic models and plain dicts
+        if hasattr(run_input, 'model_dump'):
+            self.run_input = run_input
+        elif isinstance(run_input, dict):
+            # Convert dict to RunInput if needed
+            from llm_backend.core.types.common import RunInput
+            try:
+                self.run_input = RunInput(**run_input)
+            except Exception:
+                # If conversion fails, store as-is for backward compatibility
+                self.run_input = run_input
+        else:
+            self.run_input = run_input
     
     @abstractmethod
     def get_capabilities(self) -> ProviderCapabilities:

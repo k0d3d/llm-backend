@@ -4,6 +4,7 @@ Replicate provider implementation wrapping existing ReplicateTeam logic
 
 import time
 import re
+from copy import deepcopy
 from typing import Dict, Any, List, Optional
 
 from llm_backend.core.providers.base import (
@@ -179,6 +180,39 @@ class ReplicateProvider(AIProvider):
             cost_per_request=0.01  # Estimate
         )
     
+    def _normalize_attachments(self, attachments: List[str]) -> List[str]:
+        """Normalize attachment URLs to ensure they're accessible to Replicate"""
+        if not attachments:
+            return []
+
+        normalized = []
+        for url in attachments:
+            # Handle local dev server URLs
+            if 'serve-dev.tohju.com' in url:
+                normalized.append(url)
+            # Handle replicate URLs
+            elif 'replicate.delivery' in url:
+                normalized.append(url)
+            # Handle other URLs (could add S3, etc)
+            else:
+                normalized.append(url)
+        return normalized
+
+    def _strip_attachment_mentions(self, prompt: str, attachments: List[str]) -> str:
+        """Remove attachment URL mentions from prompt text"""
+        if not prompt or not attachments:
+            return prompt
+
+        clean_prompt = prompt
+        for url in attachments:
+            # Remove both the raw URL and any markdown-style links
+            clean_prompt = clean_prompt.replace(url, '')
+            clean_prompt = re.sub(r'\[.*?\]\([^)]*\)', '', clean_prompt)
+            # Clean up any double spaces from removals
+            clean_prompt = re.sub(r'\s+', ' ', clean_prompt)
+
+        return clean_prompt.strip()
+
     def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
         """Create Replicate-specific payload using intelligent agent-based field mapping"""
         from llm_backend.agents.replicate_team import ReplicateTeam
@@ -188,10 +222,35 @@ class ReplicateProvider(AIProvider):
         if self.run_input is None:
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
+        normalized_attachments = self._normalize_attachments(attachments or [])
+        primary_attachment = normalized_attachments[0] if normalized_attachments else None
+        clean_prompt = self._strip_attachment_mentions(prompt, normalized_attachments)
+
+        example_input_data = deepcopy(self.example_input) if isinstance(self.example_input, dict) else {}
+
+        if primary_attachment:
+            image_fields = [
+                "input_image",
+                "image",
+                "image_input",
+                "source_image",
+                "image_url",
+            ]
+
+            assigned = False
+            for field in image_fields:
+                if field in example_input_data:
+                    example_input_data[field] = primary_attachment
+                    assigned = True
+                    break
+
+            if not assigned:
+                example_input_data.setdefault("input_image", primary_attachment)
+
         replicate_team = ReplicateTeam(
-            prompt=prompt,
+            prompt=clean_prompt,
             tool_config={
-                "example_input": self.example_input,
+                "example_input": example_input_data,
                 "description": self.description,
                 "latest_version": self.latest_version,
                 "model_name": self.model_name,
@@ -203,11 +262,11 @@ class ReplicateProvider(AIProvider):
         )
 
         agent_input = ExampleInput(
-            prompt=prompt,
-            example_input=self.example_input,
+            prompt=clean_prompt,
+            example_input=example_input_data,
             description=self.description,
-            attachments=attachments or None,
-            image_file=attachments[0] if attachments else None,
+            attachments=normalized_attachments or None,
+            image_file=primary_attachment,
             hitl_edits=hitl_edits,
             schema_metadata=self.field_metadata,
             hitl_field_metadata=self.hitl_alias_metadata,
@@ -237,13 +296,28 @@ class ReplicateProvider(AIProvider):
                 raise ValueError("Agent did not return an output payload")
 
             agent_input_payload = agent_output.input.model_dump()
-            if hitl_edits:
-                agent_input_payload = self._apply_hitl_edits(agent_input_payload, hitl_edits)
-
+            
+            # Set initial prompt if needed
             prompt_targets = ["prompt", "text", "input", "instruction", "query"]
             for target in prompt_targets:
                 if target in agent_input_payload or target in self.example_input:
-                    agent_input_payload[target] = prompt
+                    agent_input_payload[target] = clean_prompt
+                    break
+
+            # Apply HITL edits after setting initial values
+            if hitl_edits:
+                agent_input_payload = self._apply_hitl_edits(agent_input_payload, hitl_edits)
+
+            if primary_attachment:
+                attachment_fields = [
+                    "input_image",
+                    "image",
+                    "image_input",
+                    "source_image",
+                    "image_url",
+                ]
+                if not any(agent_input_payload.get(field) for field in attachment_fields):
+                    agent_input_payload[attachment_fields[0]] = primary_attachment
 
             agent_input_payload = self._filter_payload_to_schema(agent_input_payload)
 
@@ -272,29 +346,29 @@ class ReplicateProvider(AIProvider):
             print(f"🔍 Full traceback: {traceback.format_exc()}")
             print("🔧 Falling back to static mapping")
 
-        input_data = self._apply_hitl_edits(self.example_input.copy(), hitl_edits)
+        fallback_input = self._apply_hitl_edits(deepcopy(example_input_data), hitl_edits)
 
-        prompt_fields = ["prompt", "text", "input", "query", "instruction"]
-        for field in prompt_fields:
-            if field in input_data:
-                input_data[field] = prompt
+        for field in ["prompt", "text", "input", "query", "instruction"]:
+            if field in fallback_input:
+                fallback_input[field] = clean_prompt
                 break
 
-        if attachments and not hitl_edits:
-            image_fields = [
-                "image", "image_url", "input_image", "first_frame_image",
-                "subject_reference", "start_image", "init_image"
+        if primary_attachment and not hitl_edits:
+            fallback_attachment_fields = [
+                "image", "image_url", "input_image", "image_input",
+                "source_image", "first_frame_image", "subject_reference",
+                "start_image", "init_image"
             ]
-            for field in image_fields:
-                if field in input_data and attachments:
-                    input_data[field] = attachments[0]
+            for field in fallback_attachment_fields:
+                if field in fallback_input:
+                    fallback_input[field] = primary_attachment
                     break
 
-        input_data = self._filter_payload_to_schema(input_data)
+        fallback_input = self._filter_payload_to_schema(fallback_input)
 
         return ReplicatePayload(
             provider_name="replicate",
-            input=self._coerce_payload_to_schema(input_data),
+            input=self._coerce_payload_to_schema(fallback_input),
             operation_type=operation_type,
             model_version=self.latest_version,
             metadata={
@@ -343,7 +417,7 @@ class ReplicateProvider(AIProvider):
                     updated_input[target] = _coerce_collection(target, value)
                     applied = True
 
-            if not applied:
+            if not applied and targets:
                 primary_target = targets[0]
                 updated_input[primary_target] = _coerce_collection(primary_target, value)
 
