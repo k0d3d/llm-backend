@@ -1,7 +1,7 @@
 """
 HITL Validation System - Pre-execution checkpoints and parameter validation
 """
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -46,6 +46,8 @@ class HITLValidator:
         self.model_name = tool_config.get("name", "") or tool_config.get("model_name", "")
         self.example_input = tool_config.get("example_input", {})
         self.description = tool_config.get("description", "")
+        self.hitl_alias_metadata = tool_config.get("hitl_alias_metadata", {}) or {}
+        self.field_metadata = tool_config.get("field_metadata", {}) or {}
         print(f"🔍 HITLValidator init: model_name='{self.model_name}' from tool_config keys: {list(tool_config.keys())}")
     
     def validate_pre_execution(self) -> List[ValidationCheckpoint]:
@@ -117,10 +119,10 @@ class HITLValidator:
                 auto_fixable=False
             ))
         
-        # Validate example_input completeness
+        # Validate example_input completeness (textual parameters)
         required_fields = self._get_required_fields()
         for field in required_fields:
-            if field not in self.example_input or not self.example_input[field]:
+            if not self._has_any_field_value([field]):
                 issues.append(ValidationIssue(
                     field=field,
                     issue=f"Required parameter '{field}' is missing or empty",
@@ -128,14 +130,27 @@ class HITLValidator:
                     suggested_fix=f"Please provide a value for {field}",
                     auto_fixable=False
                 ))
-        
+
+        # Provide guidance (non-blocking) for media inputs that will be auto-resolved later
+        media_requirement = self._get_media_requirement()
+        if media_requirement:
+            canonical_field, alias_fields = media_requirement
+            if not self._has_any_field_value(alias_fields):
+                issues.append(ValidationIssue(
+                    field=canonical_field,
+                    issue="Media input will be auto-discovered from recent attachments unless you upload one.",
+                    severity="warning",
+                    suggested_fix="Attach the desired asset in chat or provide a direct URL if you want to override the default.",
+                    auto_fixable=True
+                ))
+
         return ValidationCheckpoint(
             checkpoint_type=CheckpointType.PARAMETER_REVIEW,
             title="Parameter Review",
             description="Verify all required parameters are present and valid",
             required=True,
             validation_issues=issues,
-            user_input_required=len(issues) > 0
+            user_input_required=any(issue.severity == "error" for issue in issues)
         )
     
     def _validate_inputs(self) -> ValidationCheckpoint:
@@ -265,18 +280,36 @@ class HITLValidator:
         """Get list of required fields for this model"""
         model_lower = self.model_name.lower()
         
-        if "remove-bg" in model_lower:
-            return ["image", "input_image"]
-        elif "whisper" in model_lower:
-            return ["audio", "file"]
-        elif "text-to-speech" in model_lower or "tts" in model_lower:
+        if any(keyword in model_lower for keyword in ["text-to-speech", "tts"]):
             return ["text", "prompt"]
-        elif "nano-banana" in model_lower:
-            return ["image", "prompt", "instruction"]
-        else:
-            # Default required fields
-            return [field for field in self.example_input.keys() 
-                   if any(keyword in field.lower() for keyword in ["prompt", "text", "image", "audio"])]
+
+        if "nano-banana" in model_lower:
+            return ["prompt", "instruction"]
+
+        # Inspect alias metadata for textual requirements
+        alias_text_fields: List[str] = []
+        for canonical_name, meta in (self.hitl_alias_metadata or {}).items():
+            name_lower = canonical_name.lower()
+            if any(keyword in name_lower for keyword in ["prompt", "text", "instruction"]):
+                alias_text_fields.append(canonical_name)
+
+        if alias_text_fields:
+            # Preserve order while removing duplicates
+            seen = set()
+            unique_fields = []
+            for field in alias_text_fields:
+                if field not in seen:
+                    seen.add(field)
+                    unique_fields.append(field)
+            return unique_fields
+
+        # Fallback to example input heuristics, ignoring media fields
+        textual_fields = [
+            field for field in self.example_input.keys()
+            if any(keyword in field.lower() for keyword in ["prompt", "text", "instruction"])
+            and not self._is_media_field(field)
+        ]
+        return textual_fields
     
     def _analyze_prompt_quality(self, prompt: str) -> List[ValidationIssue]:
         """Analyze prompt quality for specific model types"""
@@ -326,34 +359,92 @@ class HITLValidator:
         model_lower = self.model_name.lower()
         
         # Check image models with text-only input
-        if any(keyword in model_lower for keyword in ["image", "visual", "photo"]):
-            # Without explicit file, orchestrator will attempt discovery; surface as info-level guidance via warning
-            issues.append(ValidationIssue(
-                field="input_image",
-                issue="This model needs an image to work properly",
-                severity="error",
-                suggested_fix="Please upload an image file (JPG, PNG, GIF, or WebP)",
-                auto_fixable=False
-            ))
-        
+        if any(keyword in model_lower for keyword in ["image", "visual", "photo", "remove-bg", "nano-banana"]):
+            media_requirement = self._get_media_requirement()
+            if media_requirement:
+                canonical_field, alias_fields = media_requirement
+                if not self._has_any_field_value(alias_fields):
+                    issues.append(ValidationIssue(
+                        field=canonical_field,
+                        issue="Image input will be auto-selected from chat history unless you upload a replacement.",
+                        severity="warning",
+                        suggested_fix="Attach the desired image or keep the referenced URL in your prompt.",
+                        auto_fixable=True
+                    ))
+
         # Check audio models with non-audio input
         if any(keyword in model_lower for keyword in ["whisper", "audio", "speech"]):
-            # Cannot verify extension without explicit file; guidance only
-            issues.append(ValidationIssue(
-                field="input_audio",
-                issue="This model needs an audio file to work properly",
-                severity="error",
-                suggested_fix="Please upload an audio file (MP3, WAV, M4A, or FLAC)",
-                auto_fixable=False
-            ))
-        
+            media_requirement = self._get_media_requirement(media_type="audio")
+            if media_requirement:
+                canonical_field, alias_fields = media_requirement
+                if not self._has_any_field_value(alias_fields):
+                    issues.append(ValidationIssue(
+                        field=canonical_field,
+                        issue="Audio input will be auto-selected from chat history unless overridden.",
+                        severity="warning",
+                        suggested_fix="Attach an audio clip or provide an accessible URL.",
+                        auto_fixable=True
+                    ))
+
         return issues
+
+    def _has_any_field_value(self, candidate_fields: List[str]) -> bool:
+        """Check example input for any non-empty value across alias variants"""
+        if not candidate_fields:
+            return False
+
+        fields_to_check = set(candidate_fields)
+
+        for field in candidate_fields:
+            alias_meta = (self.hitl_alias_metadata or {}).get(field, {})
+            for alias in alias_meta.get("targets", []):
+                fields_to_check.add(alias)
+
+        for field in fields_to_check:
+            value = self.example_input.get(field)
+            if value not in (None, "", [], {}):
+                return True
+
+        return False
+
+    def _get_media_requirement(self, media_type: str = "image") -> Optional[Tuple[str, List[str]]]:
+        """Determine canonical media field and its aliases from provider metadata"""
+        alias_metadata = self.hitl_alias_metadata or {}
+
+        if media_type == "image":
+            keywords = ["image", "photo", "frame"]
+        elif media_type == "audio":
+            keywords = ["audio", "sound", "voice"]
+        else:
+            keywords = [media_type]
+
+        for canonical_name, meta in alias_metadata.items():
+            name_lower = canonical_name.lower()
+            if any(keyword in name_lower for keyword in keywords):
+                targets = meta.get("targets") or [canonical_name]
+                return canonical_name, targets
+
+        # Fallback: inspect example input keys when alias metadata is unavailable
+        for field in self.example_input.keys():
+            lower_field = field.lower()
+            if any(keyword in lower_field for keyword in keywords):
+                return field, [field]
+
+        return None
+
+    def _is_media_field(self, field_name: str) -> bool:
+        """Determine if a field represents media input"""
+        if not field_name:
+            return False
+
+        lowered = field_name.lower()
+        return any(token in lowered for token in ["image", "photo", "audio", "sound", "video", "frame", "clip"])
 
 
 def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> Dict[str, Any]:
     """Create a summary of validation results for HITL UI"""
     total_issues = sum(len(cp.validation_issues) for cp in checkpoints)
-    blocking_issues = sum(len([issue for issue in cp.validation_issues if issue.severity == "error"]) 
+    blocking_issues = sum(len([issue for issue in cp.validation_issues if issue.severity == "error"])
                          for cp in checkpoints)
     
     # Generate user-friendly message based on issues
