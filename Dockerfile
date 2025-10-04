@@ -7,8 +7,15 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl postgresql-client \
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    gcc \
+    build-essential \
+    ffmpeg \
+    libavcodec-extra \
+    libgl1-mesa-dev \
+    curl \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry
