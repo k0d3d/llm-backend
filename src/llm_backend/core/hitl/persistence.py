@@ -19,19 +19,45 @@ from sqlalchemy import (
     DateTime,
     JSON,
     Integer,
-    Enum,
-    ForeignKey,
     Text,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.types import TypeDecorator, CHAR
 
 from llm_backend.core.hitl.types import HITLState, StepEvent
 
 Base = declarative_base()
 logger = logging.getLogger(__name__)
+
+
+class GUID(TypeDecorator):
+    """Platform-independent GUID/UUID type."""
+
+    impl = CHAR
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PGUUID(as_uuid=True))
+        return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, uuid.UUID):
+            value = str(value) if dialect.name != "postgresql" else value
+        else:
+            value = uuid.UUID(str(value))
+            value = str(value) if dialect.name != "postgresql" else value
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return str(value)
 
 
 def _serialize_json(value: Any) -> Any:
@@ -67,7 +93,11 @@ def _uuid_value(value: Any) -> Optional[uuid.UUID]:
     if isinstance(value, uuid.UUID):
         return value
     if isinstance(value, str):
-        return uuid.UUID(value)
+        try:
+            return uuid.UUID(value)
+        except (ValueError, TypeError):
+            logger.warning("Unable to coerce string to UUID", extra={"value": value})
+            return None
     try:
         return uuid.UUID(str(value))
     except (ValueError, TypeError):
@@ -79,7 +109,7 @@ class HITLRun(Base):
     """Database model for HITL runs"""
     __tablename__ = 'hitl_runs'
     
-    run_id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     status = Column(String(50), nullable=False)
     current_step = Column(String(50), nullable=False)
     provider_name = Column(String(100), nullable=False)
@@ -112,7 +142,10 @@ class HITLRun(Base):
     provider_execution_time_ms = Column(Integer, default=0)
     
     # JSONB document snapshot for hybrid document/relational approach
-    state_snapshot = Column(JSONB, nullable=True)
+    state_snapshot = Column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )
 
 
 class HITLStepEvent(Base):
@@ -120,7 +153,7 @@ class HITLStepEvent(Base):
     __tablename__ = 'hitl_step_events'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(PGUUID(as_uuid=True), nullable=False)
+    run_id = Column(GUID(), nullable=False)
     step = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
@@ -135,7 +168,7 @@ class HITLPendingApproval(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     approval_id = Column(String(36), unique=True, nullable=False, index=True)
-    run_id = Column(PGUUID(as_uuid=True), nullable=False, index=True)
+    run_id = Column(GUID(), nullable=False, index=True)
     checkpoint_type = Column(String(100), nullable=False)
     context = Column(JSON, nullable=False)
     user_id = Column(String(255), nullable=True, index=True)
@@ -297,6 +330,8 @@ class DatabaseStateStore(HITLStateStore):
     
     def _create_jsonb_indexes(self):
         """Create GIN indexes for JSONB queries on state_snapshot"""
+        if self.engine.dialect.name != "postgresql":
+            return
         try:
             with self.engine.connect() as conn:
                 # Index for status queries
@@ -481,13 +516,17 @@ class DatabaseStateStore(HITLStateStore):
         """Load state from database"""
         session = self.SessionLocal()
         try:
-            run = session.query(HITLRun).filter(HITLRun.run_id == run_id).first()
+            run_uuid = _uuid_value(run_id)
+            if not run_uuid:
+                return None
+
+            run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).first()
             if not run:
                 return None
             
             # Load step events
             events = session.query(HITLStepEvent).filter(
-                HITLStepEvent.run_id == run_id
+                HITLStepEvent.run_id == run_uuid
             ).order_by(HITLStepEvent.timestamp).all()
             
             step_history = [
@@ -538,14 +577,18 @@ class DatabaseStateStore(HITLStateStore):
         """Delete state from database"""
         session = self.SessionLocal()
         try:
+            run_uuid = _uuid_value(run_id)
+            if not run_uuid:
+                return
+
             # Delete step events first
-            session.query(HITLStepEvent).filter(HITLStepEvent.run_id == run_id).delete()
+            session.query(HITLStepEvent).filter(HITLStepEvent.run_id == run_uuid).delete()
             
             # Delete approvals
-            session.query(HITLApproval).filter(HITLApproval.run_id == run_id).delete()
+            session.query(HITLApproval).filter(HITLApproval.run_id == run_uuid).delete()
             
             # Delete run
-            session.query(HITLRun).filter(HITLRun.run_id == run_id).delete()
+            session.query(HITLRun).filter(HITLRun.run_id == run_uuid).delete()
             
             session.commit()
         except Exception as e:
