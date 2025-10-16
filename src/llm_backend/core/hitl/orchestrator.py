@@ -451,10 +451,18 @@ class HITLOrchestrator:
             return {"continue": True}
 
         # NEW: Extract user-provided values from run_input
-        user_prompt = getattr(self.run_input, 'prompt', '')
-        user_attachments = self._gather_user_supplied_attachments()
+        user_prompt_raw = getattr(self.run_input, 'prompt', '')
 
-        print(f"🔍 User provided: prompt='{user_prompt[:50]}...' ({len(user_prompt)} chars), attachments={len(user_attachments)} items")
+        # Extract URLs from prompt and clean the prompt text
+        user_prompt_cleaned, prompt_urls = self._extract_and_clean_urls_from_prompt(user_prompt_raw)
+
+        # Gather explicit attachments (not from prompt)
+        explicit_attachments = self._gather_user_supplied_attachments()
+
+        # Combine explicit attachments with URLs extracted from prompt
+        user_attachments = list(explicit_attachments) + prompt_urls
+
+        print(f"🔍 User provided: prompt='{user_prompt_cleaned[:50]}...' ({len(user_prompt_cleaned)} chars), attachments={len(user_attachments)} items")
 
         # Call AI agent to classify fields
         from llm_backend.agents.form_field_classifier import classify_form_fields
@@ -477,9 +485,9 @@ class HITLOrchestrator:
         # NEW: Map user values to field names
         user_provided_values = {}
 
-        # 1. Map prompt field
-        if user_prompt:
-            user_provided_values['prompt'] = user_prompt
+        # 1. Map prompt field (use cleaned prompt without URLs)
+        if user_prompt_cleaned:
+            user_provided_values['prompt'] = user_prompt_cleaned
 
         # 2. Map attachments to appropriate fields
         if user_attachments:
@@ -1110,10 +1118,28 @@ class HITLOrchestrator:
         hitl_edits = self._collect_hitl_edits()
         if hitl_edits:
             print(f"🎯 Passing HITL edits to provider: {hitl_edits}")
-        
+
+        # Determine attachments source: form data (if available) or full discovery
+        if self.state.form_data and self.state.form_data.get("current_values"):
+            # Use attachments from form data (already filtered and user-supplied)
+            current_values = self.state.form_data.get("current_values", {})
+            form_attachments = []
+
+            # Extract attachment arrays from form fields
+            for field_name, value in current_values.items():
+                if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+                    # This looks like an attachment array
+                    form_attachments.extend(value)
+
+            attachments_to_use = form_attachments
+            print(f"📎 Using {len(attachments_to_use)} attachments from form data for execution")
+        else:
+            # Fallback to full attachment discovery
+            attachments_to_use = self._gather_attachments()
+
         payload = self.provider.create_payload(
             prompt=self.run_input.prompt,
-            attachments=self._gather_attachments(),
+            attachments=attachments_to_use,
             operation_type=self._infer_operation_type(),
             config=self.run_input.agent_tool_config or {},
             hitl_edits=hitl_edits or None
@@ -1511,11 +1537,23 @@ class HITLOrchestrator:
                         })
                     
                     elif "image" in issue.field.lower():
-                        # Try to map an image from gathered attachments (chat history, uploaded file, etc.)
-                        attachments = self._gather_attachments()
+                        # Try to map an image from form data or gathered attachments
+                        attachments = []
+
+                        # Try form data first
+                        if self.state.form_data and self.state.form_data.get("current_values"):
+                            current_values = self.state.form_data.get("current_values", {})
+                            for field_name, value in current_values.items():
+                                if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+                                    attachments.extend(value)
+
+                        # Fallback to full discovery if form data empty
+                        if not attachments:
+                            attachments = self._gather_attachments()
+
                         if attachments and hasattr(fixed_payload, 'input') and 'image' in fixed_payload.input:
                             fixed_payload.input['image'] = attachments[0]
-                        
+
                         fix_results.append({
                             "field": issue.field,
                             "fix_applied": f"Mapped discovered attachment to {issue.field}",
@@ -1531,17 +1569,54 @@ class HITLOrchestrator:
         
         return fixed_payload if fix_results else None, fix_results
 
+    def _extract_and_clean_urls_from_prompt(self, prompt: str) -> tuple:
+        """
+        Extract URLs from prompt text and return cleaned prompt without URLs.
+
+        Args:
+            prompt: The original prompt text that may contain URLs
+
+        Returns:
+            Tuple of (cleaned_prompt, extracted_urls)
+        """
+        if not prompt or not isinstance(prompt, str):
+            return prompt, []
+
+        extracted_urls = []
+        cleaned_prompt = prompt
+
+        # Find all URLs in the prompt
+        url_pattern = r'https?://\S+'
+        matches = list(re.finditer(url_pattern, prompt))
+
+        # Process matches in reverse to maintain string positions
+        for match in reversed(matches):
+            url = match.group(0).rstrip(')>,.;\'"')
+            extracted_urls.insert(0, url)  # Insert at beginning to maintain order
+            # Remove the URL from prompt
+            start, end = match.span()
+            cleaned_prompt = cleaned_prompt[:start] + cleaned_prompt[end:]
+
+        # Clean up extra whitespace
+        cleaned_prompt = re.sub(r'\s+', ' ', cleaned_prompt).strip()
+
+        if extracted_urls:
+            print(f"🔗 Extracted {len(extracted_urls)} URL(s) from prompt text")
+            print(f"📝 Cleaned prompt: '{cleaned_prompt[:100]}{'...' if len(cleaned_prompt) > 100 else ''}'")
+
+        return cleaned_prompt, extracted_urls
+
     def _gather_user_supplied_attachments(self) -> list:
-        """Gather ONLY attachments explicitly supplied by the user in this run.
+        """Gather ONLY explicit attachments supplied by the user in this run.
 
         This is used for form pre-population and excludes:
         - Example/demo URLs from agent_tool_config
         - Chat history (which may contain old attachments from previous runs)
         - HITL edits (not yet provided during initialization)
+        - URLs embedded in prompt (handled separately by _extract_and_clean_urls_from_prompt)
 
         Only includes:
         - Attachments from run_input.attachments
-        - URLs embedded in the current prompt
         """
         attachments: List[str] = []
 
@@ -1558,15 +1633,8 @@ class HITLOrchestrator:
         run_input_attachments = getattr(self.run_input, "attachments", None)
         add_attachment(run_input_attachments)
 
-        # Parse URLs embedded directly inside the prompt text
-        prompt_text = getattr(self.run_input, "prompt", "")
-        if isinstance(prompt_text, str) and prompt_text:
-            for match in re.findall(r"https?://\S+", prompt_text):
-                cleaned = match.rstrip(')>,.;\'"')
-                add_attachment(cleaned)
-
         if attachments:
-            print(f"🔗 User supplied attachments for run {self.run_id}: {attachments}")
+            print(f"🔗 User supplied explicit attachments for run {self.run_id}: {attachments}")
 
         return attachments
 
