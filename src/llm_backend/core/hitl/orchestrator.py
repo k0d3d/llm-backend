@@ -37,7 +37,11 @@ class HITLOrchestrator:
         
         # Set provider run input
         self.provider.set_run_input(self.run_input)
-        
+
+        # Link orchestrator to provider for form-based workflow
+        if hasattr(self.provider, 'set_orchestrator'):
+            self.provider.set_orchestrator(self)
+
         # Initialize state
         self.state = HITLState(
             run_id=self.run_id,
@@ -121,6 +125,79 @@ class HITLOrchestrator:
         
         print(f"🔍 Collected human edits: {human_edits}")
         return human_edits
+
+    def _apply_form_submission(self, approval_response: Optional[Dict[str, Any]]) -> None:
+        """Handle form field submissions from user"""
+        if not approval_response:
+            return
+
+        print(f"📝 Applying form submission")
+
+        edits = approval_response.get("edits", {})
+        if not edits:
+            print("⚠️ No edits in form submission")
+            return
+
+        # Ensure form_data exists
+        if not self.state.form_data:
+            print("⚠️ No form_data in state, initializing")
+            self.state.form_data = {
+                "schema": {},
+                "classification": {},
+                "defaults": {},
+                "current_values": {},
+                "user_edits": {}
+            }
+
+        classification = self.state.form_data.get("classification", {})
+        field_classifications = classification.get("field_classifications", {})
+
+        for field, value in edits.items():
+            # Store user edit
+            self.state.form_data["user_edits"][field] = value
+            print(f"📝 User provided: {field} = {value}")
+
+            # Get field classification
+            field_class = field_classifications.get(field, {})
+
+            if field_class.get("collection"):
+                # For arrays, handle appending/replacing
+                current = self.state.form_data["current_values"].get(field, [])
+                if isinstance(value, list):
+                    # Replace entire array
+                    self.state.form_data["current_values"][field] = value
+                    print(f"   ✅ Set array field '{field}' with {len(value)} items")
+                else:
+                    # Append single item
+                    if not isinstance(current, list):
+                        current = []
+                    current.append(value)
+                    self.state.form_data["current_values"][field] = current
+                    print(f"   ✅ Added to array field '{field}' (now {len(current)} items)")
+            else:
+                # For non-arrays, direct assignment
+                self.state.form_data["current_values"][field] = value
+                print(f"   ✅ Set field '{field}' = {value}")
+
+        # Preserve approval metadata
+        self.state.last_approval = approval_response
+
+        # Update status
+        self.state.pending_actions = []
+        self.state.status = HITLStatus.RUNNING
+        self.state.updated_at = datetime.utcnow()
+
+        # Persist updated state
+        if self.state_manager:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.state_manager.save_state(self.state))
+                else:
+                    loop.run_until_complete(self.state_manager.save_state(self.state))
+            except RuntimeError:
+                asyncio.run(self.state_manager.save_state(self.state))
 
     def _apply_approval_response(self, approval_response: Optional[Dict[str, Any]], step: Optional[HITLStep] = None) -> None:
         """Persist approval details and merge edits into orchestrator state."""
@@ -249,6 +326,7 @@ class HITLOrchestrator:
 
     def _get_step_pipeline(self) -> List[Callable[[], Dict[str, Any]]]:
         return [
+            (HITLStep.FORM_INITIALIZATION, self._step_form_initialization),
             (HITLStep.INFORMATION_REVIEW, self._step_information_review),
             (HITLStep.PAYLOAD_REVIEW, self._step_payload_review),
             (HITLStep.API_CALL, self._step_api_execution),
@@ -351,33 +429,284 @@ class HITLOrchestrator:
         except Exception as e:
             print(f"❌ WebSocket notification failed: {e}")
             # Don't fail the entire workflow if WebSocket fails
-    
+
+    async def _step_form_initialization(self) -> Dict[str, Any]:
+        """Form initialization step - classify and reset fields from example_input"""
+        self._transition_to_step(HITLStep.FORM_INITIALIZATION)
+
+        print("📋 Starting form initialization from example_input")
+
+        # Get example_input from provider
+        example_input = self.provider.example_input if hasattr(self.provider, 'example_input') else {}
+        model_name = self.provider.model_name if hasattr(self.provider, 'model_name') else ""
+        description = self.provider.description if hasattr(self.provider, 'description') else ""
+        field_metadata = self.provider.field_metadata if hasattr(self.provider, 'field_metadata') else None
+
+        if not example_input:
+            print("⚠️ No example_input found, skipping form initialization")
+            self._add_step_event(HITLStep.FORM_INITIALIZATION, HITLStatus.COMPLETED, "system", "No example_input - skipped")
+            return {"continue": True}
+
+        # Call AI agent to classify fields
+        from llm_backend.agents.form_field_classifier import classify_form_fields
+
+        try:
+            classification = await classify_form_fields(
+                example_input=example_input,
+                model_name=model_name,
+                model_description=description,
+                field_metadata=field_metadata
+            )
+            print(f"✅ AI classification complete: {len(classification.field_classifications)} fields classified")
+            print(f"   Required fields: {classification.required_fields}")
+            print(f"   Optional fields: {classification.optional_fields}")
+        except Exception as e:
+            print(f"❌ Form classification failed: {e}")
+            # This will fail the run as we can't proceed without classification
+            raise Exception(f"Failed to classify form fields: {e}")
+
+        # Build form with reset logic applied
+        form_data = self._build_form_from_classification(example_input, classification)
+
+        # Extract defaults (values that were NOT reset)
+        defaults = self._extract_defaults_from_classification(example_input, classification)
+
+        # Store in state
+        self.state.form_data = {
+            "schema": example_input,
+            "classification": classification.model_dump(),
+            "defaults": defaults,
+            "current_values": form_data,
+            "user_edits": {}
+        }
+
+        print(f"📋 Form initialized with {len(form_data)} fields")
+        print(f"   Reset fields: {[k for k, v in form_data.items() if v in (None, '', [])]}")
+        print(f"   Fields with defaults: {list(defaults.keys())}")
+
+        self._add_step_event(HITLStep.FORM_INITIALIZATION, HITLStatus.COMPLETED, "system", "Form initialized from example_input")
+        return {"continue": True}
+
+    def _build_form_from_classification(
+        self,
+        example_input: Dict[str, Any],
+        classification: Any
+    ) -> Dict[str, Any]:
+        """
+        Build form by applying reset logic based on AI classification
+        Handles nested objects recursively
+        """
+        form = {}
+        field_classifications = classification.field_classifications
+
+        for field, value in example_input.items():
+            if field not in field_classifications:
+                # Field not classified, keep as-is
+                form[field] = value
+                continue
+
+            field_class = field_classifications[field]
+
+            # Handle nested objects recursively
+            if isinstance(value, dict) and field_class.nested_classification:
+                nested_classification_data = field_class.nested_classification
+                # Create a mock classification object for recursion
+                nested_classification = type('obj', (object,), {
+                    'field_classifications': nested_classification_data
+                })()
+                form[field] = self._build_form_from_classification(value, nested_classification)
+                continue
+
+            # Handle arrays - ALWAYS reset to empty
+            if isinstance(value, (list, tuple)):
+                form[field] = []
+                print(f"   🔄 Reset array field '{field}': {value} → []")
+                continue
+
+            # Handle based on AI classification reset flag
+            if field_class.reset:
+                # Reset to default_value from classification
+                form[field] = field_class.default_value
+                print(f"   🔄 Reset field '{field}' ({field_class.category}): {value} → {field_class.default_value}")
+            else:
+                # Keep the example default value
+                form[field] = value
+                print(f"   ✅ Keep default for '{field}' ({field_class.category}): {value}")
+
+        return form
+
+    def _extract_defaults_from_classification(
+        self,
+        example_input: Dict[str, Any],
+        classification: Any
+    ) -> Dict[str, Any]:
+        """Extract fields that kept their default values (were not reset)"""
+        defaults = {}
+        field_classifications = classification.field_classifications
+
+        for field, value in example_input.items():
+            if field not in field_classifications:
+                continue
+
+            field_class = field_classifications[field]
+
+            # If field was NOT reset, it's a default
+            if not field_class.reset and not isinstance(value, (list, tuple)):
+                defaults[field] = value
+
+        return defaults
+
     async def _step_information_review(self) -> Dict[str, Any]:
-        """Enhanced information review checkpoint with comprehensive validation"""
+        """Form prompting checkpoint - prompt user for required form fields"""
         self._transition_to_step(HITLStep.INFORMATION_REVIEW)
-        
-        # Run comprehensive pre-execution validation
+
+        print("📋 Information Review: Form-based prompting")
+
+        # Check if we have form data from initialization
+        if not self.state.form_data:
+            print("⚠️ No form_data found - falling back to legacy validation")
+            return await self._legacy_information_review()
+
+        # Get form classification
+        classification = self.state.form_data.get("classification", {})
+        current_values = self.state.form_data.get("current_values", {})
+        field_classifications = classification.get("field_classifications", {})
+
+        # Build form field definitions for UI
+        form_fields = []
+        required_fields = []
+        optional_fields = []
+
+        for field_name, field_class in field_classifications.items():
+            current_value = current_values.get(field_name)
+
+            field_def = {
+                "name": field_name,
+                "label": field_name.replace("_", " ").title(),
+                "type": self._infer_ui_field_type(field_class.get("value_type", "string")),
+                "category": field_class.get("category"),
+                "required": field_class.get("required", False),
+                "current_value": current_value,
+                "default": field_class.get("default_value"),
+                "prompt": field_class.get("user_prompt", f"Provide {field_name}"),
+                "collection": field_class.get("collection", False),
+            }
+
+            # Add field-specific attributes
+            if field_class.get("collection"):
+                field_def["hint"] = "You can add multiple items"
+
+            form_fields.append(field_def)
+
+            if field_class.get("required"):
+                required_fields.append(field_name)
+            else:
+                optional_fields.append(field_name)
+
+        # Check if all required fields are filled
+        missing_required = []
+        for field_name in required_fields:
+            value = current_values.get(field_name)
+            if value is None or value == "" or (isinstance(value, list) and len(value) == 0):
+                missing_required.append(field_name)
+
+        print(f"📊 Form status:")
+        print(f"   Total fields: {len(form_fields)}")
+        print(f"   Required fields: {len(required_fields)}")
+        print(f"   Missing required: {missing_required}")
+
+        # Determine if we need to pause for user input
+        needs_user_input = len(missing_required) > 0
+
+        # Also check policy
+        if not needs_user_input:
+            # Get provider capabilities for policy check
+            try:
+                capabilities = self.provider.get_capabilities()
+                needs_user_input = self._should_pause_at_information_review(capabilities)
+            except Exception:
+                pass
+
+        if needs_user_input:
+            print("⏸️ PAUSING for form submission - prompting user for required fields")
+
+            pause_response = self._create_pause_response(
+                step=HITLStep.INFORMATION_REVIEW,
+                message="Please provide required information to continue",
+                actions_required=["submit_form", "provide_required_fields"],
+                data={
+                    "checkpoint_type": "form_requirements",
+                    "form": {
+                        "title": "Configure Model Parameters",
+                        "fields": form_fields,
+                    },
+                    "required_fields": required_fields,
+                    "optional_fields": optional_fields,
+                    "missing_required_fields": missing_required,
+                }
+            )
+            
+            # Send WebSocket message for HITL approval request and persist state
+            print("🔄 About to call request_human_approval...")
+            try:
+                if self.websocket_bridge:
+                    approval_response = await self.websocket_bridge.request_human_approval(
+                        run_id=self.run_id,
+                        checkpoint_type="form_requirements",
+                        context=pause_response,
+                        user_id=getattr(self.run_input, 'user_id', None),
+                        session_id=getattr(self.run_input, 'session_id', None)
+                    )
+                    print("🔄 request_human_approval completed")
+                    self._apply_form_submission(approval_response)
+
+                    actor = approval_response.get("approved_by")
+                    if actor is None or actor == "":
+                        actor_label = "human"
+                    else:
+                        actor_label = f"human:{actor}"
+
+                    self._add_step_event(
+                        HITLStep.INFORMATION_REVIEW,
+                        HITLStatus.COMPLETED,
+                        actor_label,
+                        f"Form submitted with {len(approval_response.get('edits', {}))} fields"
+                    )
+                    return {"continue": True, "approval": approval_response}
+                else:
+                    print("⚠️ No websocket_bridge available, cannot request approval")
+                    raise Exception("WebSocket bridge is required for HITL approval requests")
+            except Exception as ws_error:
+                print(f"❌ WebSocket notification failed: {ws_error}")
+            return pause_response
+
+        print("✅ All required form fields filled - continuing")
+        self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Form complete - all required fields provided")
+        return {"continue": True}
+
+    async def _legacy_information_review(self) -> Dict[str, Any]:
+        """Legacy information review using validation checkpoints (fallback)"""
         # Extract tool config from the correct key structure
         agent_tool_config = self.run_input.agent_tool_config or {}
         replicate_config = agent_tool_config.get("replicate-agent-tool", {}).get("data", {})
         print(f"🔍 Orchestrator: Using tool_config: {replicate_config}")
-        
+
         validator = HITLValidator(
             run_input=self.run_input,
             tool_config=replicate_config
         )
-        
+
         validation_checkpoints = validator.validate_pre_execution()
         validation_summary = create_hitl_validation_summary(validation_checkpoints)
         friendly_message = validation_summary.get("user_friendly_message", "I need your help to continue")
-        
+
         print(f"🚨 Blocking Issues: {validation_summary['blocking_issues']}")
-        
+
         # Store validation results in state
         self.state.validation_checkpoints = validation_summary
         self.state.validation_summary = validation_summary
         self.state.user_friendly_message = friendly_message
-        
+
         # Get provider capabilities
         try:
             capabilities = self.provider.get_capabilities()
@@ -391,17 +720,16 @@ class HITLOrchestrator:
                 input_types=["image"],
                 output_types=["image"]
             )
-        
+
         # Check if human review is required based on validation or capabilities
         blocking_issues = validation_summary["blocking_issues"] > 0
-        
+
         # Only pause if there are blocking issues OR policy requires human review
-        # Skip confidence-based pausing when there are no validation issues
         if blocking_issues:
             needs_review = True
         else:
             needs_review = self._should_pause_at_information_review(capabilities)
-        
+
         print(f"🤔 Needs review? {needs_review} (blocking_issues: {blocking_issues})")
 
         if needs_review:
@@ -418,7 +746,7 @@ class HITLOrchestrator:
                     "checkpoints": validation_summary["checkpoints"]
                 }
             )
-            
+
             # Send WebSocket message for HITL approval request and persist state
             print("🔄 About to call request_human_approval...")
             try:
@@ -452,9 +780,21 @@ class HITLOrchestrator:
             except Exception as ws_error:
                 print(f"❌ WebSocket notification failed: {ws_error}")
             return pause_response
-        
+
         self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Auto-approved based on validation and thresholds")
         return {"continue": True}
+
+    def _infer_ui_field_type(self, value_type: str) -> str:
+        """Map value type to UI field type"""
+        type_mapping = {
+            "string": "text",
+            "integer": "number",
+            "number": "number",
+            "boolean": "checkbox",
+            "array": "array",
+            "object": "object",
+        }
+        return type_mapping.get(value_type, "text")
     
     async def _step_payload_review(self) -> Dict[str, Any]:
         """Enhanced payload review checkpoint with improved error handling"""

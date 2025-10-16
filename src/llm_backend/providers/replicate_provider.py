@@ -33,6 +33,7 @@ class ReplicateProvider(AIProvider):
         self.model_name = config.get("name", "")
         self.field_metadata = self._build_field_metadata()
         self.hitl_alias_metadata = self._build_hitl_alias_metadata(self.field_metadata)
+        self._orchestrator = None  # Will be set by orchestrator if using form-based workflow
     
     def _build_field_metadata(self) -> Dict[str, Dict[str, Any]]:
         """Derive lightweight schema metadata from the example input."""
@@ -253,17 +254,52 @@ class ReplicateProvider(AIProvider):
             if isinstance(value, str) and "replicate.delivery" in value:
                 resolved[key] = primary_attachment
                 print(f"🔧 Manual replacement: {key} -> {primary_attachment}")
-        
+
         return resolved
 
+    def set_orchestrator(self, orchestrator):
+        """Set the orchestrator reference to access form data"""
+        self._orchestrator = orchestrator
+        print(f"📋 Orchestrator linked to provider for form-based payload creation")
+
+    async def _create_payload_from_form(self, form_data: Dict[str, Any], operation_type: OperationType, config: Dict) -> ReplicatePayload:
+        """Create payload directly from form data (bypasses intelligent agent)"""
+        current_values = form_data.get("current_values", {})
+
+        print(f"📋 Creating payload from form with {len(current_values)} fields")
+
+        # Apply schema coercion to ensure proper types
+        payload_input = self._coerce_payload_to_schema(current_values)
+
+        # Filter to only include fields from example_input schema
+        payload_input = self._filter_payload_to_schema(payload_input)
+
+        print(f"📦 Final payload input: {list(payload_input.keys())}")
+
+        return ReplicatePayload(
+            input=payload_input,
+            operation_type=operation_type,
+            model_version=self.latest_version,
+            webhook_url=config.get("webhook_url")
+        )
+
     async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
-        """Create Replicate-specific payload using intelligent agent-based field mapping"""
+        """Create Replicate-specific payload from form data or intelligent agent mapping"""
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
         import asyncio
 
         if self.run_input is None:
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
+
+        # NEW: Check if we have form data from HITL orchestrator
+        if hasattr(self, '_orchestrator') and self._orchestrator and hasattr(self._orchestrator.state, 'form_data'):
+            form_data = self._orchestrator.state.form_data
+            if form_data and form_data.get("current_values"):
+                print("📋 Using form data directly for payload creation")
+                return await self._create_payload_from_form(form_data, operation_type, config)
+
+        print("🤖 No form data available - using intelligent agent for payload creation")
 
         normalized_attachments = self._normalize_attachments(attachments or [])
         

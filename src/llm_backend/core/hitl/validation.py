@@ -498,3 +498,129 @@ def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> D
             for cp in checkpoints
         ]
     }
+
+
+def validate_form_completeness(
+    form_data: Dict[str, Any],
+    classification: Dict[str, Any]
+) -> List[ValidationIssue]:
+    """
+    Validate that form has all required fields filled
+
+    Args:
+        form_data: Current form values
+        classification: AI classification with field requirements
+
+    Returns:
+        List of validation issues for missing/invalid fields
+    """
+    issues = []
+    field_classifications = classification.get("field_classifications", {})
+
+    for field_name, field_class in field_classifications.items():
+        if not field_class.get("required"):
+            continue
+
+        value = form_data.get(field_name)
+
+        # Check required field is not empty
+        if value is None or value == "" or (isinstance(value, list) and len(value) == 0):
+            issues.append(ValidationIssue(
+                field=field_name,
+                issue=f"Required field '{field_name}' is empty",
+                severity="error",
+                suggested_fix=field_class.get("user_prompt", f"Please provide {field_name}"),
+                auto_fixable=False
+            ))
+
+    return issues
+
+
+def validate_form_field_types(
+    form_data: Dict[str, Any],
+    classification: Dict[str, Any]
+) -> List[ValidationIssue]:
+    """
+    Validate that form field values match expected types
+
+    Args:
+        form_data: Current form values
+        classification: AI classification with field types
+
+    Returns:
+        List of validation issues for type mismatches
+    """
+    issues = []
+    field_classifications = classification.get("field_classifications", {})
+
+    for field_name, value in form_data.items():
+        if field_name not in field_classifications:
+            continue
+
+        field_class = field_classifications[field_name]
+        expected_type = field_class.get("value_type")
+
+        # Skip validation for None/empty values (handled by completeness check)
+        if value is None or value == "":
+            continue
+
+        # Type validation
+        type_valid = True
+        if expected_type == "array" and not isinstance(value, list):
+            type_valid = False
+        elif expected_type == "object" and not isinstance(value, dict):
+            type_valid = False
+        elif expected_type in ["integer", "number"] and not isinstance(value, (int, float)):
+            # Try to convert if it's a string number
+            if isinstance(value, str):
+                try:
+                    float(value) if expected_type == "number" else int(value)
+                except ValueError:
+                    type_valid = False
+            else:
+                type_valid = False
+        elif expected_type == "boolean" and not isinstance(value, bool):
+            type_valid = False
+
+        if not type_valid:
+            issues.append(ValidationIssue(
+                field=field_name,
+                issue=f"Field '{field_name}' has wrong type (expected {expected_type}, got {type(value).__name__})",
+                severity="warning",
+                suggested_fix=f"Please provide a valid {expected_type} value",
+                auto_fixable=False
+            ))
+
+    return issues
+
+
+def create_form_validation_summary(form_data: Dict[str, Any], classification: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create comprehensive validation summary for form data
+
+    Args:
+        form_data: Current form values
+        classification: AI classification with field requirements
+
+    Returns:
+        Validation summary with blocking issues count and details
+    """
+    completeness_issues = validate_form_completeness(form_data, classification)
+    type_issues = validate_form_field_types(form_data, classification)
+
+    all_issues = completeness_issues + type_issues
+    blocking_issues = [issue for issue in all_issues if issue.severity == "error"]
+
+    return {
+        "blocking_issues": len(blocking_issues),
+        "total_issues": len(all_issues),
+        "completeness_issues": [issue.model_dump() for issue in completeness_issues],
+        "type_issues": [issue.model_dump() for issue in type_issues],
+        "all_issues": [issue.model_dump() for issue in all_issues],
+        "is_valid": len(blocking_issues) == 0,
+        "user_friendly_message": (
+            "Form is complete and valid"
+            if len(blocking_issues) == 0
+            else f"{len(blocking_issues)} required field(s) need attention"
+        )
+    }

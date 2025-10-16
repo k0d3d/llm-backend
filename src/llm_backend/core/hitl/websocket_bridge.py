@@ -54,17 +54,23 @@ class WebSocketHITLBridge:
     ) -> Dict[str, Any]:
         """
         Request human approval through WebSocket and wait for response
-        
+
         Args:
             run_id: HITL run identifier
-            checkpoint_type: Type of checkpoint (payload_approval, validation_review, etc.)
+            checkpoint_type: Type of checkpoint (payload_approval, validation_review, form_requirements, etc.)
             context: Context data for the approval request
             user_id: User to send approval request to
             session_id: Specific browser session to target
             schema: Optional field schema metadata for editable fields
-            
+
         Returns:
             Approval response from human reviewer
+
+        Supported checkpoint types:
+            - information_review: Legacy validation-based review
+            - form_requirements: Form-based field collection (NEW)
+            - payload_review: Review generated payload
+            - response_review: Review model output
         """
         approval_id = str(uuid.uuid4())
         expires_at = datetime.utcnow() + timedelta(seconds=self.approval_timeout)

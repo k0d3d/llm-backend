@@ -19,6 +19,7 @@ class HITLPolicy(str, Enum):
 class HITLStep(str, Enum):
     """HITL workflow steps"""
     CREATED = "created"
+    FORM_INITIALIZATION = "form_initialization"
     INFORMATION_REVIEW = "information_review"
     PAYLOAD_REVIEW = "payload_review"
     API_CALL = "api_call"
@@ -99,10 +100,23 @@ class HITLState(BaseModel):
     checkpoint_context: Optional[Dict[str, Any]] = None
     last_approval: Optional[Dict[str, Any]] = None
     human_edits: Dict[str, Any] = {}
-    
+
+    # Form-based workflow data
+    form_data: Optional[Dict[str, Any]] = None
+    """
+    Form data structure:
+    {
+        "schema": {...},  # Original example_input
+        "classification": {...},  # AI agent field classifications
+        "defaults": {...},  # Default values per field
+        "current_values": {...},  # Current form state (reset/defaults applied)
+        "user_edits": {...}  # User-provided values
+    }
+    """
+
     # Audit trail
     step_history: List[StepEvent] = []
-    
+
     # Metrics
     total_execution_time_ms: int = 0
     human_review_time_ms: int = 0

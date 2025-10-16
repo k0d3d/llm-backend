@@ -5,23 +5,544 @@ This guide provides comprehensive instructions for integrating the Human-in-the-
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [API Integration](#api-integration)
-3. [WebSocket Integration](#websocket-integration)
-4. [Session Resume & State Management](#session-resume--state-management)
-5. [React Components](#react-components)
-6. [State Management](#state-management)
-7. [Error Handling](#error-handling)
-8. [User Experience Patterns](#user-experience-patterns)
-9. [Complete Examples](#complete-examples)
+2. [Form-Based HITL Workflow](#form-based-hitl-workflow) **NEW**
+3. [API Integration](#api-integration)
+4. [WebSocket Integration](#websocket-integration)
+5. [Session Resume & State Management](#session-resume--state-management)
+6. [React Components](#react-components)
+7. [State Management](#state-management)
+8. [Error Handling](#error-handling)
+9. [User Experience Patterns](#user-experience-patterns)
+10. [Complete Examples](#complete-examples)
 
 ## Overview
 
 The HITL system provides enhanced AI workflow control with human oversight through:
-- **Pre-execution validation checkpoints**
+- **Form-based parameter collection** **NEW** - Interactive forms built from model schemas
+- **Pre-execution validation checkpoints** - Legacy validation-based approach
 - **Real-time WebSocket communication**
 - **Interactive approval workflows**
 - **Comprehensive error handling**
 - **Parameter validation and guidance**
+
+### HITL Workflow Modes
+
+The system supports two modes:
+
+1. **Form-Based Mode (NEW)** - Recommended for new integrations
+   - Treats `example_input` as a form definition
+   - Prompts users for required fields upfront
+   - Direct form-to-payload mapping (no AI guessing)
+   - Clear distinction between content fields and config parameters
+
+2. **Validation-Based Mode (Legacy)** - Backward compatible
+   - Validates against `example_input` schema
+   - Shows errors when parameters are missing
+   - User fixes issues after validation
+   - Falls back automatically if form initialization fails
+
+## Form-Based HITL Workflow
+
+The new form-based workflow provides a superior UX by treating model parameters as an interactive form rather than validation errors to fix.
+
+### How It Works
+
+1. **Backend**: AI classifies each field in `example_input` as:
+   - **CONTENT** - User must provide (images, prompts) → Reset to empty
+   - **CONFIG** - Optional parameters with defaults (steps, scale) → Keep defaults
+   - **HYBRID** - Optional content → Empty but not required
+
+2. **Frontend**: Receives form definition with field metadata
+3. **User**: Fills required fields, optionally adjusts configs
+4. **Submission**: Form values used directly as payload (no AI field mapping)
+
+### WebSocket Message Format
+
+#### Form Requirements Checkpoint
+
+When the backend pauses for form input, you'll receive:
+
+```typescript
+interface FormRequirementsMessage {
+  type: "hitl_approval_request";
+  data: {
+    approval_id: string;
+    run_id: string;
+    checkpoint_type: "form_requirements"; // NEW checkpoint type
+    context: {
+      message: string;
+      checkpoint_type: "form_requirements";
+      form: {
+        title: string;
+        fields: FormField[];
+      };
+      required_fields: string[];
+      optional_fields: string[];
+      missing_required_fields: string[];
+    };
+  };
+}
+
+interface FormField {
+  name: string;                    // Field identifier
+  label: string;                   // Display label
+  type: "text" | "number" | "file" | "checkbox" | "array"; // UI field type
+  category: "CONTENT" | "CONFIG" | "HYBRID"; // Field classification
+  required: boolean;               // Is field required?
+  current_value: any;              // Current value (null for reset fields)
+  default?: any;                   // Default value if applicable
+  prompt: string;                  // User-friendly prompt
+  collection: boolean;             // Is this an array field?
+  hint?: string;                   // Additional guidance (e.g., "You can add multiple items")
+}
+```
+
+#### Example Form Requirements Message
+
+```json
+{
+  "type": "hitl_approval_request",
+  "data": {
+    "approval_id": "approval-123",
+    "run_id": "run-456",
+    "checkpoint_type": "form_requirements",
+    "context": {
+      "message": "Please provide required information to continue",
+      "checkpoint_type": "form_requirements",
+      "form": {
+        "title": "Configure Model Parameters",
+        "fields": [
+          {
+            "name": "input_image",
+            "label": "Input Image",
+            "type": "file",
+            "category": "CONTENT",
+            "required": true,
+            "current_value": null,
+            "prompt": "Upload an image to process",
+            "collection": false
+          },
+          {
+            "name": "negative_prompts",
+            "label": "Negative Prompts",
+            "type": "array",
+            "category": "CONTENT",
+            "required": false,
+            "current_value": [],
+            "prompt": "Optionally provide negative prompts",
+            "collection": true,
+            "hint": "You can add multiple items"
+          },
+          {
+            "name": "guidance_scale",
+            "label": "Guidance Scale",
+            "type": "number",
+            "category": "CONFIG",
+            "required": false,
+            "current_value": 7.5,
+            "default": 7.5,
+            "prompt": "Adjust guidance scale (optional)",
+            "collection": false
+          }
+        ]
+      },
+      "required_fields": ["input_image"],
+      "optional_fields": ["negative_prompts", "guidance_scale"],
+      "missing_required_fields": ["input_image"]
+    }
+  }
+}
+```
+
+### Form Submission
+
+Submit user-provided values via the standard approval endpoint:
+
+```typescript
+// Submit form values
+await submitApproval(
+  runId,
+  approvalId,
+  'approve', // or 'edit'
+  {
+    // Form field values provided by user
+    input_image: "https://user-upload.com/image.jpg",
+    negative_prompts: ["blurry", "low quality"],
+    guidance_scale: 8.0 // User changed from default 7.5
+  },
+  undefined, // reason (optional)
+  userId
+);
+```
+
+### React Component for Form-Based HITL
+
+```typescript
+import React, { useState } from 'react';
+
+interface FormBasedHITLCardProps {
+  hitlData: {
+    run_id: string;
+    context: {
+      message: string;
+      checkpoint_type: string;
+      form?: {
+        title: string;
+        fields: FormField[];
+      };
+      required_fields: string[];
+      optional_fields: string[];
+      missing_required_fields: string[];
+    };
+  };
+  onApprovalComplete?: (approved: boolean, runId: string) => void;
+}
+
+export const FormBasedHITLCard: React.FC<FormBasedHITLCardProps> = ({
+  hitlData,
+  onApprovalComplete
+}) => {
+  const [formValues, setFormValues] = useState<Record<string, any>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Check if this is a form requirements checkpoint
+  const isFormCheckpoint = hitlData.context.checkpoint_type === 'form_requirements';
+  const form = hitlData.context.form;
+
+  if (!isFormCheckpoint || !form) {
+    // Fall back to legacy validation card
+    return <LegacyHITLValidationCard hitlData={hitlData} onApprovalComplete={onApprovalComplete} />;
+  }
+
+  const handleFieldChange = (fieldName: string, value: any) => {
+    setFormValues(prev => ({
+      ...prev,
+      [fieldName]: value
+    }));
+
+    // Clear error for this field
+    if (errors[fieldName]) {
+      setErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors[fieldName];
+        return newErrors;
+      });
+    }
+  };
+
+  const validateForm = (): boolean => {
+    const newErrors: Record<string, string> = {};
+
+    // Check required fields
+    hitlData.context.required_fields.forEach(fieldName => {
+      const value = formValues[fieldName];
+      if (value === undefined || value === null || value === '' ||
+          (Array.isArray(value) && value.length === 0)) {
+        newErrors[fieldName] = `${fieldName} is required`;
+      }
+    });
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async () => {
+    if (!validateForm()) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await submitApproval(
+        hitlData.run_id,
+        hitlData.run_id, // approval_id
+        'approve',
+        formValues, // Form data as edits
+        undefined,
+        currentUserId
+      );
+      onApprovalComplete?.(true, hitlData.run_id);
+    } catch (error) {
+      console.error('Failed to submit form:', error);
+      setErrors({ _form: 'Failed to submit form. Please try again.' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const renderField = (field: FormField) => {
+    const value = formValues[field.name] ?? field.current_value;
+    const hasError = errors[field.name];
+
+    switch (field.type) {
+      case 'file':
+        return (
+          <div key={field.name} className="mb-3">
+            <label className="form-label">
+              {field.label}
+              {field.required && <span className="text-danger"> *</span>}
+            </label>
+            <input
+              type="file"
+              className={`form-control ${hasError ? 'is-invalid' : ''}`}
+              accept="image/*"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                  // Handle file upload - convert to URL or upload to server
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    handleFieldChange(field.name, reader.result);
+                  };
+                  reader.readAsDataURL(file);
+                }
+              }}
+            />
+            <div className="form-text text-muted">{field.prompt}</div>
+            {hasError && <div className="invalid-feedback d-block">{hasError}</div>}
+          </div>
+        );
+
+      case 'array':
+        return (
+          <div key={field.name} className="mb-3">
+            <label className="form-label">
+              {field.label}
+              {field.required && <span className="text-danger"> *</span>}
+            </label>
+            <div className="input-group">
+              <input
+                type="text"
+                className={`form-control ${hasError ? 'is-invalid' : ''}`}
+                placeholder={field.prompt}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const input = e.currentTarget;
+                    if (input.value.trim()) {
+                      const currentArray = Array.isArray(value) ? value : [];
+                      handleFieldChange(field.name, [...currentArray, input.value.trim()]);
+                      input.value = '';
+                    }
+                  }
+                }}
+              />
+              <button
+                className="btn btn-outline-secondary btn-sm"
+                type="button"
+                onClick={(e) => {
+                  const input = e.currentTarget.previousElementSibling as HTMLInputElement;
+                  if (input.value.trim()) {
+                    const currentArray = Array.isArray(value) ? value : [];
+                    handleFieldChange(field.name, [...currentArray, input.value.trim()]);
+                    input.value = '';
+                  }
+                }}
+              >
+                Add
+              </button>
+            </div>
+            {field.hint && <div className="form-text text-muted">{field.hint}</div>}
+            {Array.isArray(value) && value.length > 0 && (
+              <div className="mt-2">
+                {value.map((item, idx) => (
+                  <span key={idx} className="badge bg-primary me-1">
+                    {item}
+                    <button
+                      type="button"
+                      className="btn-close btn-close-white ms-1"
+                      style={{ fontSize: '10px' }}
+                      onClick={() => {
+                        const newArray = value.filter((_, i) => i !== idx);
+                        handleFieldChange(field.name, newArray);
+                      }}
+                    />
+                  </span>
+                ))}
+              </div>
+            )}
+            {hasError && <div className="invalid-feedback d-block">{hasError}</div>}
+          </div>
+        );
+
+      case 'number':
+        return (
+          <div key={field.name} className="mb-3">
+            <label className="form-label">
+              {field.label}
+              {field.required && <span className="text-danger"> *</span>}
+              {field.default !== undefined && (
+                <span className="text-muted ms-2">(default: {field.default})</span>
+              )}
+            </label>
+            <input
+              type="number"
+              className={`form-control ${hasError ? 'is-invalid' : ''}`}
+              value={value ?? ''}
+              onChange={(e) => handleFieldChange(field.name, parseFloat(e.target.value))}
+              placeholder={field.prompt}
+            />
+            <div className="form-text text-muted">{field.prompt}</div>
+            {hasError && <div className="invalid-feedback d-block">{hasError}</div>}
+          </div>
+        );
+
+      case 'checkbox':
+        return (
+          <div key={field.name} className="mb-3">
+            <div className="form-check">
+              <input
+                type="checkbox"
+                className="form-check-input"
+                checked={value || false}
+                onChange={(e) => handleFieldChange(field.name, e.target.checked)}
+              />
+              <label className="form-check-label">
+                {field.label}
+                {field.required && <span className="text-danger"> *</span>}
+              </label>
+            </div>
+            <div className="form-text text-muted">{field.prompt}</div>
+            {hasError && <div className="invalid-feedback d-block">{hasError}</div>}
+          </div>
+        );
+
+      default: // text
+        return (
+          <div key={field.name} className="mb-3">
+            <label className="form-label">
+              {field.label}
+              {field.required && <span className="text-danger"> *</span>}
+            </label>
+            <input
+              type="text"
+              className={`form-control ${hasError ? 'is-invalid' : ''}`}
+              value={value ?? ''}
+              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              placeholder={field.prompt}
+            />
+            <div className="form-text text-muted">{field.prompt}</div>
+            {hasError && <div className="invalid-feedback d-block">{hasError}</div>}
+          </div>
+        );
+    }
+  };
+
+  // Separate required and optional fields
+  const requiredFields = form.fields.filter(f => f.required);
+  const optionalFields = form.fields.filter(f => !f.required);
+
+  return (
+    <div className="hitl-form-card bg-light border rounded-3 p-4 mb-3">
+      {/* Header */}
+      <div className="d-flex align-items-center mb-3">
+        <i className="bi bi-ui-checks text-primary me-2" style={{ fontSize: '24px' }}></i>
+        <div>
+          <h5 className="mb-0">{form.title}</h5>
+          <p className="text-muted small mb-0">{hitlData.context.message}</p>
+        </div>
+      </div>
+
+      {/* Form Errors */}
+      {errors._form && (
+        <div className="alert alert-danger" role="alert">
+          {errors._form}
+        </div>
+      )}
+
+      {/* Required Fields Section */}
+      {requiredFields.length > 0 && (
+        <div className="mb-4">
+          <h6 className="text-danger mb-3">
+            <i className="bi bi-asterisk me-1"></i>
+            Required Fields
+          </h6>
+          {requiredFields.map(renderField)}
+        </div>
+      )}
+
+      {/* Optional Fields Section */}
+      {optionalFields.length > 0 && (
+        <div className="mb-4">
+          <h6 className="text-muted mb-3">
+            <i className="bi bi-sliders me-1"></i>
+            Optional Configuration
+          </h6>
+          {optionalFields.map(renderField)}
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="d-flex gap-2 mt-4">
+        <button
+          className="btn btn-primary"
+          onClick={handleSubmit}
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? (
+            <>
+              <span className="spinner-border spinner-border-sm me-2" />
+              Submitting...
+            </>
+          ) : (
+            <>
+              <i className="bi bi-check-circle me-2"></i>
+              Submit & Continue
+            </>
+          )}
+        </button>
+
+        <button
+          className="btn btn-outline-secondary"
+          onClick={() => onApprovalComplete?.(false, hitlData.run_id)}
+          disabled={isSubmitting}
+        >
+          <i className="bi bi-x-circle me-2"></i>
+          Cancel
+        </button>
+      </div>
+
+      {/* Run Info */}
+      <div className="mt-3 pt-3 border-top">
+        <small className="text-muted">
+          Run ID: {hitlData.run_id} |
+          Missing: {hitlData.context.missing_required_fields.join(', ') || 'None'}
+        </small>
+      </div>
+    </div>
+  );
+};
+```
+
+### Key Differences from Legacy Mode
+
+| Aspect | Form-Based Mode | Legacy Validation Mode |
+|--------|----------------|------------------------|
+| **Checkpoint Type** | `form_requirements` | `information_review` |
+| **Message Structure** | Contains `form` object with field definitions | Contains `validation_summary` with issues |
+| **UX** | Fill form fields | Fix validation errors |
+| **Field Classification** | AI classifies upfront (CONTENT/CONFIG) | No classification |
+| **Default Values** | Config fields keep defaults | No distinction |
+| **Array Handling** | Always start empty | May contain example values |
+| **Submission** | Form values as edits | Fixes to validation issues |
+
+### Migration from Legacy to Form-Based
+
+Your existing HITL cards can support both modes:
+
+```typescript
+const HITLCard = ({ hitlData, onApprovalComplete }) => {
+  // Detect checkpoint type
+  const checkpointType = hitlData.context?.checkpoint_type || hitlData.context?.current_step;
+
+  if (checkpointType === 'form_requirements') {
+    return <FormBasedHITLCard hitlData={hitlData} onApprovalComplete={onApprovalComplete} />;
+  }
+
+  // Fall back to legacy validation card
+  return <LegacyHITLValidationCard hitlData={hitlData} onApprovalComplete={onApprovalComplete} />;
+};
+```
 
 ## API Integration
 
