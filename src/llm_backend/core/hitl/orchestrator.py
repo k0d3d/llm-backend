@@ -452,7 +452,7 @@ class HITLOrchestrator:
 
         # NEW: Extract user-provided values from run_input
         user_prompt = getattr(self.run_input, 'prompt', '')
-        user_attachments = self._gather_attachments()
+        user_attachments = self._gather_user_supplied_attachments()
 
         print(f"🔍 User provided: prompt='{user_prompt[:50]}...' ({len(user_prompt)} chars), attachments={len(user_attachments)} items")
 
@@ -991,9 +991,28 @@ class HITLOrchestrator:
             # Create payload
             operation_type = self._infer_operation_type()
             hitl_edits = self._collect_hitl_edits()
+
+            # Determine attachments source: form data (if available) or full discovery
+            if self.state.form_data and self.state.form_data.get("current_values"):
+                # Use attachments from form data (already filtered and user-supplied)
+                current_values = self.state.form_data.get("current_values", {})
+                form_attachments = []
+
+                # Extract attachment arrays from form fields
+                for field_name, value in current_values.items():
+                    if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+                        # This looks like an attachment array
+                        form_attachments.extend(value)
+
+                attachments_to_use = form_attachments
+                print(f"📎 Using {len(attachments_to_use)} attachments from form data")
+            else:
+                # Fallback to full attachment discovery
+                attachments_to_use = self._gather_attachments()
+
             payload = self.provider.create_payload(
                 prompt=self.run_input.prompt,
-                attachments=self._gather_attachments(),
+                attachments=attachments_to_use,
                 operation_type=operation_type,
                 config=self.run_input.agent_tool_config or {},
                 hitl_edits=hitl_edits or None
@@ -1001,12 +1020,12 @@ class HITLOrchestrator:
 
             if asyncio.iscoroutine(payload):
                 payload = await payload
-            
-            # Validate payload with enhanced validation
+
+            # Validate payload with same attachments
             validation_issues = self.provider.validate_payload(
                 payload,
                 self.run_input.prompt,
-                self._gather_attachments()
+                attachments_to_use
             )
             
             payload_dict = payload.dict()
@@ -1511,6 +1530,45 @@ class HITLOrchestrator:
                     })
         
         return fixed_payload if fix_results else None, fix_results
+
+    def _gather_user_supplied_attachments(self) -> list:
+        """Gather ONLY attachments explicitly supplied by the user in this run.
+
+        This is used for form pre-population and excludes:
+        - Example/demo URLs from agent_tool_config
+        - Chat history (which may contain old attachments from previous runs)
+        - HITL edits (not yet provided during initialization)
+
+        Only includes:
+        - Attachments from run_input.attachments
+        - URLs embedded in the current prompt
+        """
+        attachments: List[str] = []
+
+        def add_attachment(value: Any):
+            if isinstance(value, str):
+                candidate = value.strip()
+                if candidate and candidate not in attachments:
+                    attachments.append(candidate)
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    add_attachment(item)
+
+        # Attachments explicitly supplied on run input
+        run_input_attachments = getattr(self.run_input, "attachments", None)
+        add_attachment(run_input_attachments)
+
+        # Parse URLs embedded directly inside the prompt text
+        prompt_text = getattr(self.run_input, "prompt", "")
+        if isinstance(prompt_text, str) and prompt_text:
+            for match in re.findall(r"https?://\S+", prompt_text):
+                cleaned = match.rstrip(')>,.;\'"')
+                add_attachment(cleaned)
+
+        if attachments:
+            print(f"🔗 User supplied attachments for run {self.run_id}: {attachments}")
+
+        return attachments
 
     def _gather_attachments(self) -> list:
         """Gather attachments from available sources.
