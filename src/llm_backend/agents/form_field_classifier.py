@@ -156,7 +156,14 @@ async def classify_form_fields(
 
     try:
         result = await agent.run(input_data.model_dump())
-        return result.data
+        classification_result = result.data
+
+        # Validate that we got actual classifications
+        if not classification_result.field_classifications or len(classification_result.field_classifications) == 0:
+            print(f"⚠️ AI classification returned empty results, falling back to heuristic classification")
+            return _fallback_classification(example_input, model_name, model_description)
+
+        return classification_result
     except Exception as e:
         print(f"⚠️ AI classification failed: {e}, falling back to heuristic classification")
         return _fallback_classification(example_input, model_name, model_description)

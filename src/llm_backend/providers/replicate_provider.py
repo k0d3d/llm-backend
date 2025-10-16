@@ -276,11 +276,17 @@ class ReplicateProvider(AIProvider):
 
         print(f"📦 Final payload input: {list(payload_input.keys())}")
 
+        # Build webhook URL - handle None case
+        webhook_url = config.get("webhook_url")
+        if webhook_url is None:
+            webhook_url = ""  # Use empty string instead of None
+
         return ReplicatePayload(
             input=payload_input,
             operation_type=operation_type,
             model_version=self.latest_version,
-            webhook_url=config.get("webhook_url")
+            webhook_url=webhook_url,
+            provider_name=self.model_name  # ADD: Missing provider_name field
         )
 
     async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:

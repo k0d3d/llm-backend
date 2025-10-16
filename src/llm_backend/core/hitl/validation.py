@@ -518,18 +518,23 @@ def validate_form_completeness(
     field_classifications = classification.get("field_classifications", {})
 
     for field_name, field_class in field_classifications.items():
-        if not field_class.get("required"):
+        # Handle both object and dict forms
+        required = getattr(field_class, 'required', None) if hasattr(field_class, 'required') else field_class.get("required", False)
+
+        if not required:
             continue
 
         value = form_data.get(field_name)
 
         # Check required field is not empty
         if value is None or value == "" or (isinstance(value, list) and len(value) == 0):
+            user_prompt = getattr(field_class, 'user_prompt', None) if hasattr(field_class, 'user_prompt') else field_class.get("user_prompt", f"Please provide {field_name}")
+
             issues.append(ValidationIssue(
                 field=field_name,
                 issue=f"Required field '{field_name}' is empty",
                 severity="error",
-                suggested_fix=field_class.get("user_prompt", f"Please provide {field_name}"),
+                suggested_fix=user_prompt,
                 auto_fixable=False
             ))
 
@@ -558,7 +563,8 @@ def validate_form_field_types(
             continue
 
         field_class = field_classifications[field_name]
-        expected_type = field_class.get("value_type")
+        # Handle both object and dict forms
+        expected_type = getattr(field_class, 'value_type', None) if hasattr(field_class, 'value_type') else field_class.get("value_type")
 
         # Skip validation for None/empty values (handled by completeness check)
         if value is None or value == "":

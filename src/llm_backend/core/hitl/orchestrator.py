@@ -160,7 +160,10 @@ class HITLOrchestrator:
             # Get field classification
             field_class = field_classifications.get(field, {})
 
-            if field_class.get("collection"):
+            # Handle both object and dict forms
+            is_collection = getattr(field_class, 'collection', None) if hasattr(field_class, 'collection') else field_class.get("collection", False)
+
+            if is_collection:
                 # For arrays, handle appending/replacing
                 current = self.state.form_data["current_values"].get(field, [])
                 if isinstance(value, list):
@@ -447,6 +450,12 @@ class HITLOrchestrator:
             self._add_step_event(HITLStep.FORM_INITIALIZATION, HITLStatus.COMPLETED, "system", "No example_input - skipped")
             return {"continue": True}
 
+        # NEW: Extract user-provided values from run_input
+        user_prompt = getattr(self.run_input, 'prompt', '')
+        user_attachments = self._gather_attachments()
+
+        print(f"🔍 User provided: prompt='{user_prompt[:50]}...' ({len(user_prompt)} chars), attachments={len(user_attachments)} items")
+
         # Call AI agent to classify fields
         from llm_backend.agents.form_field_classifier import classify_form_fields
 
@@ -465,8 +474,28 @@ class HITLOrchestrator:
             # This will fail the run as we can't proceed without classification
             raise Exception(f"Failed to classify form fields: {e}")
 
-        # Build form with reset logic applied
-        form_data = self._build_form_from_classification(example_input, classification)
+        # NEW: Map user values to field names
+        user_provided_values = {}
+
+        # 1. Map prompt field
+        if user_prompt:
+            user_provided_values['prompt'] = user_prompt
+
+        # 2. Map attachments to appropriate fields
+        if user_attachments:
+            attachment_mapping = self._map_attachments_to_fields(
+                user_attachments,
+                classification.field_classifications
+            )
+            user_provided_values.update(attachment_mapping)
+            print(f"📎 Mapped {len(user_attachments)} attachments to fields: {list(attachment_mapping.keys())}")
+
+        # Build form with reset logic applied AND user values
+        form_data = self._build_form_from_classification(
+            example_input,
+            classification,
+            user_provided_values
+        )
 
         # Extract defaults (values that were NOT reset)
         defaults = self._extract_defaults_from_classification(example_input, classification)
@@ -490,14 +519,17 @@ class HITLOrchestrator:
     def _build_form_from_classification(
         self,
         example_input: Dict[str, Any],
-        classification: Any
+        classification: Any,
+        user_provided_values: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Build form by applying reset logic based on AI classification
+        Pre-populates with user-provided values if available
         Handles nested objects recursively
         """
         form = {}
         field_classifications = classification.field_classifications
+        user_values = user_provided_values or {}
 
         for field, value in example_input.items():
             if field not in field_classifications:
@@ -507,31 +539,49 @@ class HITLOrchestrator:
 
             field_class = field_classifications[field]
 
+            # NEW: Check if user already provided a value for this field
+            if field in user_values:
+                user_value = user_values[field]
+                form[field] = user_value
+                print(f"   ✅ Pre-populated '{field}' from user input: {user_value if not isinstance(user_value, list) else f'[{len(user_value)} items]'}")
+                continue
+
+            # Get nested_classification (handle both object and dict forms)
+            nested_class = getattr(field_class, 'nested_classification', None) if hasattr(field_class, 'nested_classification') else field_class.get('nested_classification')
+
             # Handle nested objects recursively
-            if isinstance(value, dict) and field_class.nested_classification:
+            if isinstance(value, dict) and nested_class:
                 nested_classification_data = field_class.nested_classification
                 # Create a mock classification object for recursion
                 nested_classification = type('obj', (object,), {
                     'field_classifications': nested_classification_data
                 })()
-                form[field] = self._build_form_from_classification(value, nested_classification)
+                form[field] = self._build_form_from_classification(
+                    value,
+                    nested_classification,
+                    user_values.get(field, {}) if isinstance(user_values.get(field), dict) else {}
+                )
                 continue
 
-            # Handle arrays - ALWAYS reset to empty
+            # Handle arrays - ALWAYS reset to empty (if not pre-populated above)
             if isinstance(value, (list, tuple)):
                 form[field] = []
                 print(f"   🔄 Reset array field '{field}': {value} → []")
                 continue
 
-            # Handle based on AI classification reset flag
-            if field_class.reset:
+            # Handle based on AI classification reset flag (handle both object and dict forms)
+            reset_flag = getattr(field_class, 'reset', None) if hasattr(field_class, 'reset') else field_class.get('reset', False)
+            default_val = getattr(field_class, 'default_value', None) if hasattr(field_class, 'default_value') else field_class.get('default_value')
+            category = getattr(field_class, 'category', '') if hasattr(field_class, 'category') else field_class.get('category', '')
+
+            if reset_flag:
                 # Reset to default_value from classification
-                form[field] = field_class.default_value
-                print(f"   🔄 Reset field '{field}' ({field_class.category}): {value} → {field_class.default_value}")
+                form[field] = default_val
+                print(f"   🔄 Reset field '{field}' ({category}): {value} → {default_val}")
             else:
                 # Keep the example default value
                 form[field] = value
-                print(f"   ✅ Keep default for '{field}' ({field_class.category}): {value}")
+                print(f"   ✅ Keep default for '{field}' ({category}): {value}")
 
         return form
 
@@ -550,11 +600,79 @@ class HITLOrchestrator:
 
             field_class = field_classifications[field]
 
+            # Handle both object and dict forms
+            reset_flag = getattr(field_class, 'reset', None) if hasattr(field_class, 'reset') else field_class.get('reset', False)
+
             # If field was NOT reset, it's a default
-            if not field_class.reset and not isinstance(value, (list, tuple)):
+            if not reset_flag and not isinstance(value, (list, tuple)):
                 defaults[field] = value
 
         return defaults
+
+    def _map_attachments_to_fields(
+        self,
+        attachments: List[str],
+        field_classifications: Dict[str, Any]
+    ) -> Dict[str, List[str]]:
+        """
+        Map user attachments to appropriate form fields
+        Returns dict of field_name -> attachment_list
+        """
+        mapping = {}
+
+        # Common attachment field names (in priority order)
+        attachment_field_patterns = [
+            # Image fields
+            "image_input", "input_image", "images", "input_images",
+            "source_image", "target_image", "image_url", "image",
+            # File fields
+            "file_input", "input_file", "files", "input_files",
+            # Generic media
+            "media", "media_input", "input", "attachment", "attachments"
+        ]
+
+        # Find the first matching field that is a collection (array)
+        for field_name, field_class in field_classifications.items():
+            # Handle both object and dict forms
+            if hasattr(field_class, 'collection'):
+                # Object form (FieldClassification)
+                is_collection = field_class.collection
+                value_type = field_class.value_type
+            else:
+                # Dict form
+                is_collection = field_class.get("collection", False)
+                value_type = field_class.get("value_type", "")
+
+            # Check if this field is a collection (array type)
+            if is_collection or value_type == "array":
+                # Check if field name matches any attachment pattern
+                field_lower = field_name.lower()
+                for pattern in attachment_field_patterns:
+                    if pattern in field_lower or field_lower in pattern:
+                        # Found matching field!
+                        mapping[field_name] = attachments
+                        print(f"   📎 Matched attachments to field '{field_name}'")
+                        return mapping  # Use first match only
+
+        # If no exact match found, try to find any array field in the schema
+        for field_name, field_class in field_classifications.items():
+            # Handle both object and dict forms
+            if hasattr(field_class, 'collection'):
+                is_collection = field_class.collection
+                value_type = field_class.value_type
+            else:
+                is_collection = field_class.get("collection", False)
+                value_type = field_class.get("value_type", "")
+
+            if is_collection or value_type == "array":
+                # Use first array field as fallback
+                mapping[field_name] = attachments
+                print(f"   📎 Fallback: Mapped attachments to first array field '{field_name}'")
+                return mapping
+
+        # No suitable field found
+        print(f"   ⚠️ No suitable attachment field found in schema")
+        return mapping
 
     async def _step_information_review(self) -> Dict[str, Any]:
         """Form prompting checkpoint - prompt user for required form fields"""
@@ -580,25 +698,33 @@ class HITLOrchestrator:
         for field_name, field_class in field_classifications.items():
             current_value = current_values.get(field_name)
 
+            # Handle both object and dict forms
+            value_type = getattr(field_class, 'value_type', None) if hasattr(field_class, 'value_type') else field_class.get("value_type", "string")
+            category = getattr(field_class, 'category', None) if hasattr(field_class, 'category') else field_class.get("category")
+            required = getattr(field_class, 'required', None) if hasattr(field_class, 'required') else field_class.get("required", False)
+            default_value = getattr(field_class, 'default_value', None) if hasattr(field_class, 'default_value') else field_class.get("default_value")
+            user_prompt = getattr(field_class, 'user_prompt', None) if hasattr(field_class, 'user_prompt') else field_class.get("user_prompt", f"Provide {field_name}")
+            collection = getattr(field_class, 'collection', None) if hasattr(field_class, 'collection') else field_class.get("collection", False)
+
             field_def = {
                 "name": field_name,
                 "label": field_name.replace("_", " ").title(),
-                "type": self._infer_ui_field_type(field_class.get("value_type", "string")),
-                "category": field_class.get("category"),
-                "required": field_class.get("required", False),
+                "type": self._infer_ui_field_type(value_type),
+                "category": category,
+                "required": required,
                 "current_value": current_value,
-                "default": field_class.get("default_value"),
-                "prompt": field_class.get("user_prompt", f"Provide {field_name}"),
-                "collection": field_class.get("collection", False),
+                "default": default_value,
+                "prompt": user_prompt,
+                "collection": collection,
             }
 
             # Add field-specific attributes
-            if field_class.get("collection"):
+            if collection:
                 field_def["hint"] = "You can add multiple items"
 
             form_fields.append(field_def)
 
-            if field_class.get("required"):
+            if required:
                 required_fields.append(field_name)
             else:
                 optional_fields.append(field_name)
@@ -615,10 +741,21 @@ class HITLOrchestrator:
         print(f"   Required fields: {len(required_fields)}")
         print(f"   Missing required: {missing_required}")
 
+        # NEW: Skip pause if form is already complete
+        if len(missing_required) == 0:
+            print("✅ All required fields already filled from user input - skipping HITL pause")
+            self._add_step_event(
+                HITLStep.INFORMATION_REVIEW,
+                HITLStatus.COMPLETED,
+                "system",
+                "Form complete - no human input needed"
+            )
+            return {"continue": True}
+
         # Determine if we need to pause for user input
         needs_user_input = len(missing_required) > 0
 
-        # Also check policy
+        # Also check policy (only if form is incomplete)
         if not needs_user_input:
             # Get provider capabilities for policy check
             try:
@@ -660,6 +797,56 @@ class HITLOrchestrator:
                     print("🔄 request_human_approval completed")
                     self._apply_form_submission(approval_response)
 
+                    # NEW: Validate form completeness after submission
+                    from llm_backend.core.hitl.validation import validate_form_completeness
+
+                    updated_values = self.state.form_data.get("current_values", {})
+                    classification = self.state.form_data.get("classification", {})
+
+                    validation_issues = validate_form_completeness(updated_values, classification)
+
+                    if validation_issues:
+                        # Form still incomplete after submission - reject and re-prompt
+                        print(f"⚠️ Form validation failed after submission: {len(validation_issues)} issues found")
+                        for issue in validation_issues:
+                            print(f"   ❌ {issue.field}: {issue.issue}")
+
+                        # Keep status as AWAITING_HUMAN and re-pause
+                        self.state.status = HITLStatus.AWAITING_HUMAN
+                        self._add_step_event(
+                            HITLStep.INFORMATION_REVIEW,
+                            HITLStatus.AWAITING_HUMAN,
+                            "system",
+                            f"Form incomplete - {len(validation_issues)} required fields still missing"
+                        )
+
+                        # Re-create pause response with validation errors
+                        new_pause_response = self._create_pause_response(
+                            step=HITLStep.INFORMATION_REVIEW,
+                            message=f"Please fill all required fields. Missing: {', '.join([issue.field for issue in validation_issues])}",
+                            actions_required=["submit_form", "provide_required_fields"],
+                            data={
+                                "checkpoint_type": "form_requirements",
+                                "form": pause_response["data"]["form"],
+                                "required_fields": required_fields,
+                                "optional_fields": optional_fields,
+                                "missing_required_fields": [issue.field for issue in validation_issues],
+                                "validation_errors": [issue.model_dump() for issue in validation_issues]
+                            }
+                        )
+
+                        # Re-request approval
+                        print("🔄 Re-prompting user for missing fields...")
+                        await self.websocket_bridge.request_human_approval(
+                            run_id=self.run_id,
+                            checkpoint_type="form_requirements",
+                            context=new_pause_response,
+                            user_id=getattr(self.run_input, 'user_id', None),
+                            session_id=getattr(self.run_input, 'session_id', None)
+                        )
+                        return new_pause_response
+
+                    # Form is complete - continue
                     actor = approval_response.get("approved_by")
                     if actor is None or actor == "":
                         actor_label = "human"
