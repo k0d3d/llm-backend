@@ -1151,7 +1151,15 @@ class HITLOrchestrator:
                 payload_dict = self._merge_payload_edits(payload_dict, hitl_edits)
             self.state.suggested_payload = payload_dict
             self.state.validation_issues = [issue.dict() for issue in validation_issues]
-            
+
+            # Log validation results for debugging
+            if validation_issues:
+                print(f"⚠️ Validation found {len(validation_issues)} issue(s):")
+                for issue in validation_issues:
+                    print(f"   {issue.severity.upper()}: {issue.field} - {issue.issue}")
+            else:
+                print("✅ Payload validation passed - no issues found")
+
             # Check for critical validation failures that require human intervention
             critical_issues = [issue for issue in validation_issues if issue.severity == "error" and not issue.auto_fixable]
             

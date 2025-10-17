@@ -702,6 +702,11 @@ class ReplicateProvider(AIProvider):
     def _is_field_required(self, key: str, value: any) -> bool:
         """Determine if a field is required"""
         key_lower = key.lower()
+
+        # Special case: system_prompt is optional configuration
+        if "system" in key_lower and "prompt" in key_lower:
+            return False
+
         # Fields that are typically required when present
         required_keywords = ["prompt", "text", "instruction", "image", "audio", "file", "input"]
         return any(keyword in key_lower for keyword in required_keywords) and not value

@@ -54,7 +54,8 @@ CLASSIFIER_SYSTEM_PROMPT = """You are an expert at analyzing AI model parameters
 Key rules:
 - ALL arrays/lists should be RESET to empty [] regardless of category
 - Media fields (image, video, audio, file URLs) are CONTENT - must be RESET
-- Prompt/text input fields are CONTENT - must be RESET
+- User prompt/text input fields (prompt, text, instruction) are CONTENT - must be RESET
+- System prompts (system_prompt, system_message) are CONFIG - keep defaults (optional)
 - Numeric parameters (scale, steps, strength) are CONFIG - keep defaults
 - Enum/choice parameters (scheduler, format, quality) are CONFIG - keep defaults
 - Seed values are CONFIG - keep defaults (or null for random)
@@ -198,12 +199,18 @@ def _fallback_classification(
         config_patterns = [
             "scale", "steps", "iterations", "strength", "guidance",
             "temperature", "seed", "scheduler", "sampler", "format",
-            "quality", "resolution", "num_", "max_", "min_", "cfg"
+            "quality", "resolution", "num_", "max_", "min_", "cfg",
+            "system_prompt", "system_message", "system"
         ]
 
         # Classify based on patterns
         is_content = any(pattern in field_lower for pattern in content_patterns)
         is_config = any(pattern in field_lower for pattern in config_patterns)
+
+        # Special case: system_prompt is configuration, not required content
+        if "system" in field_lower and "prompt" in field_lower:
+            is_content = False
+            is_config = True
 
         # Override logic
         if is_collection:
