@@ -21,12 +21,48 @@ The agent classifies each field in `example_input` into categories:
 - **HYBRID** - Optional content → Reset but not required
 
 **Key Features:**
-- Uses GPT-4 for intelligent classification
+- Uses GPT-4o-mini for intelligent classification
 - Fallback heuristic classification if AI fails
 - Handles nested objects recursively
 - Generates user-friendly prompts for each field
 
-### 2. New HITL Step: FORM_INITIALIZATION
+### 2. New AI Agent: AttachmentMappingAgent
+
+**File:** `src/llm_backend/agents/attachment_mapper.py`
+
+The agent intelligently maps user-provided attachments (files/URLs) to form fields using semantic understanding:
+
+**Key Features:**
+- Uses GPT-4o-mini for semantic field name matching
+- Understands equivalence: "image" = "input_image" = "img" = "photo"
+- Detects file types from URLs: `.jpg` → image fields, `.mp3` → audio fields
+- Handles both single string fields AND array fields (not just arrays)
+- Prioritizes CONTENT category fields over CONFIG fields
+- Provides confidence scores and reasoning for each mapping
+- Falls back to improved heuristic matching if AI fails
+
+**Problem Solved:**
+Previous hardcoded logic only checked array fields, missing single fields like `{"image": "..."}`. Now handles all field types with AI-powered semantic matching.
+
+**Example Mapping:**
+```python
+# Input
+user_attachments = ["https://serve.com/photo.jpg"]
+field_classifications = {
+    "image": {"category": "CONTENT", "collection": False}
+}
+
+# AI Output
+{
+    "field_name": "image",
+    "attachment": "https://serve.com/photo.jpg",
+    "confidence": 0.95,
+    "file_type": "image",
+    "reasoning": "Image file matches CONTENT image field"
+}
+```
+
+### 3. New HITL Step: FORM_INITIALIZATION
 
 **File:** `src/llm_backend/core/hitl/types.py`
 
@@ -68,30 +104,42 @@ Form data structure:
 **Method:** `orchestrator._step_form_initialization()`
 
 1. Extract `example_input` from provider
-2. Call `FormFieldClassifierAgent` to classify fields
-3. Build form applying reset logic:
-   - **ALL arrays → empty []**
-   - **CONTENT fields → null or ""**
+2. Extract URLs from user prompt and gather explicit attachments
+3. Call `FormFieldClassifierAgent` to classify fields (CONTENT/CONFIG/HYBRID)
+4. Call `AttachmentMappingAgent` to map user attachments to appropriate fields
+5. Build form applying reset logic with user-provided values:
+   - **ALL arrays → empty []** (unless pre-populated from attachments)
+   - **CONTENT fields → null or ""** (unless pre-populated from attachments)
    - **CONFIG fields → keep defaults**
-4. Store form data in state
+6. Store form data in state
+
+**Key Enhancement:** Attachments are now intelligently mapped before form initialization, so fields are pre-populated when the user has already provided the required content.
 
 **Example:**
 ```python
 # example_input
 {
-  "input_image": "https://example.com/demo.jpg",
+  "image": "https://example.com/demo.jpg",
   "negative_prompts": ["blurry", "low quality"],
   "guidance_scale": 7.5,
   "num_steps": 50
 }
 
-# After form initialization
+# User provides
+user_attachments = ["https://serve.com/photo.jpg"]
+
+# After AttachmentMappingAgent
+attachment_mapping = {"image": "https://serve.com/photo.jpg"}  # AI mapped!
+
+# After form initialization (WITH pre-population)
 {
-  "input_image": null,  # RESET (content field)
+  "image": "https://serve.com/photo.jpg",  # PRE-POPULATED from attachment!
   "negative_prompts": [],  # RESET (always empty arrays)
   "guidance_scale": 7.5,  # KEEP (config field)
   "num_steps": 50  # KEEP (config field)
 }
+
+# Result: No prompt for image field - already filled!
 ```
 
 ### Step 2: Information Review (Form Prompting)

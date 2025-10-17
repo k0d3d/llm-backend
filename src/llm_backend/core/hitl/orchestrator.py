@@ -491,7 +491,7 @@ class HITLOrchestrator:
 
         # 2. Map attachments to appropriate fields
         if user_attachments:
-            attachment_mapping = self._map_attachments_to_fields(
+            attachment_mapping = await self._map_attachments_to_fields(
                 user_attachments,
                 classification.field_classifications
             )
@@ -617,69 +617,179 @@ class HITLOrchestrator:
 
         return defaults
 
-    def _map_attachments_to_fields(
+    async def _map_attachments_to_fields(
         self,
         attachments: List[str],
         field_classifications: Dict[str, Any]
-    ) -> Dict[str, List[str]]:
+    ) -> Dict[str, Any]:
         """
-        Map user attachments to appropriate form fields
-        Returns dict of field_name -> attachment_list
+        Map user attachments to appropriate form fields using AI agent
+        Returns dict of field_name -> attachment (single value or list for arrays)
+        """
+        if not attachments:
+            return {}
+
+        if not field_classifications:
+            print(f"   ⚠️ No field classifications available for attachment mapping")
+            return {}
+
+        # Get model context for better AI mapping
+        model_name = self.provider.model_name if hasattr(self.provider, 'model_name') else ""
+        description = self.provider.description if hasattr(self.provider, 'description') else ""
+        example_input = self.provider.example_input if hasattr(self.provider, 'example_input') else {}
+
+        try:
+            # Use AI agent for intelligent mapping
+            from llm_backend.agents.attachment_mapper import map_attachments_to_fields
+
+            print(f"   🤖 Using AI agent to map {len(attachments)} attachment(s) to fields...")
+            mapping_result = await map_attachments_to_fields(
+                user_attachments=attachments,
+                field_classifications=field_classifications,
+                example_input=example_input,
+                model_name=model_name,
+                model_description=description
+            )
+
+            # Convert AI mappings to expected format
+            mapping = {}
+            for field_mapping in mapping_result.mappings:
+                field_name = field_mapping.field_name
+                attachment = field_mapping.attachment
+
+                # Get field metadata to determine if it's an array
+                field_class = field_classifications.get(field_name)
+                if field_class:
+                    if hasattr(field_class, 'collection'):
+                        is_collection = field_class.collection
+                    else:
+                        is_collection = field_class.get('collection', False)
+
+                    # For arrays, store as list; for single fields, store as string
+                    if is_collection:
+                        # Append to existing list or create new one
+                        if field_name in mapping:
+                            mapping[field_name].append(attachment)
+                        else:
+                            mapping[field_name] = [attachment]
+                    else:
+                        # Single field gets single value
+                        mapping[field_name] = attachment
+
+                    confidence = field_mapping.confidence
+                    print(f"   ✅ AI mapped: {field_name} → {attachment} (confidence: {confidence:.2f})")
+
+            if mapping_result.unmapped_attachments:
+                print(f"   ⚠️ Unmapped attachments: {mapping_result.unmapped_attachments}")
+
+            if mapping_result.unmapped_fields:
+                print(f"   ⚠️ Unmapped CONTENT fields: {mapping_result.unmapped_fields}")
+
+            return mapping
+
+        except Exception as e:
+            print(f"   ⚠️ AI mapping failed ({e}), using improved heuristic fallback")
+            return self._heuristic_map_attachments_to_fields(attachments, field_classifications)
+
+    def _heuristic_map_attachments_to_fields(
+        self,
+        attachments: List[str],
+        field_classifications: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Improved heuristic fallback for attachment mapping
+        Handles both single fields AND array fields (not just arrays)
         """
         mapping = {}
 
-        # Common attachment field names (in priority order)
-        attachment_field_patterns = [
-            # Image fields
-            "image_input", "input_image", "images", "input_images",
-            "source_image", "target_image", "image_url", "image",
-            # File fields
-            "file_input", "input_file", "files", "input_files",
-            # Generic media
-            "media", "media_input", "input", "attachment", "attachments"
-        ]
+        # Analyze attachment file types
+        from llm_backend.agents.field_analyzer import analyze_url_pattern, analyze_field_name
 
-        # Find the first matching field that is a collection (array)
-        for field_name, field_class in field_classifications.items():
-            # Handle both object and dict forms
-            if hasattr(field_class, 'collection'):
-                # Object form (FieldClassification)
-                is_collection = field_class.collection
-                value_type = field_class.value_type
-            else:
-                # Dict form
-                is_collection = field_class.get("collection", False)
-                value_type = field_class.get("value_type", "")
+        attachment_types = {}
+        for url in attachments:
+            analysis = analyze_url_pattern(url)
+            attachment_types[url] = analysis.get('file_type', 'unknown')
 
-            # Check if this field is a collection (array type)
-            if is_collection or value_type == "array":
-                # Check if field name matches any attachment pattern
+        # Priority patterns for different file types (now includes single field names!)
+        field_patterns = {
+            'image': ['image', 'img', 'photo', 'picture', 'input_image', 'source_image', 'image_input', 'image_url'],
+            'audio': ['audio', 'sound', 'music', 'input_audio', 'audio_file', 'audio_input'],
+            'video': ['video', 'movie', 'input_video', 'video_file', 'video_input'],
+            'document': ['document', 'doc', 'file', 'input_file', 'document_input'],
+        }
+
+        # Score each field for each attachment
+        for attachment in attachments:
+            file_type = attachment_types.get(attachment, 'unknown')
+            relevant_patterns = field_patterns.get(file_type, ['input', 'file', 'attachment'])
+
+            best_field = None
+            best_score = 0.0
+
+            for field_name, field_class in field_classifications.items():
+                # Get field metadata
+                if hasattr(field_class, 'category'):
+                    category = str(field_class.category)
+                    is_collection = field_class.collection
+                    required = field_class.required
+                else:
+                    category = field_class.get('category', 'HYBRID')
+                    is_collection = field_class.get('collection', False)
+                    required = field_class.get('required', False)
+
+                # Skip CONFIG fields
+                if 'CONFIG' in category:
+                    continue
+
+                # Calculate match score
+                score = 0.0
                 field_lower = field_name.lower()
-                for pattern in attachment_field_patterns:
-                    if pattern in field_lower or field_lower in pattern:
-                        # Found matching field!
-                        mapping[field_name] = attachments
-                        print(f"   📎 Matched attachments to field '{field_name}'")
-                        return mapping  # Use first match only
 
-        # If no exact match found, try to find any array field in the schema
-        for field_name, field_class in field_classifications.items():
-            # Handle both object and dict forms
-            if hasattr(field_class, 'collection'):
-                is_collection = field_class.collection
-                value_type = field_class.value_type
-            else:
-                is_collection = field_class.get("collection", False)
-                value_type = field_class.get("value_type", "")
+                # Exact or semantic match
+                for pattern in relevant_patterns:
+                    if pattern == field_lower:
+                        score += 0.9  # Exact match (including "image" = "image")
+                        break
+                    elif pattern in field_lower or field_lower in pattern:
+                        score += 0.7  # Partial match
+                        break
 
-            if is_collection or value_type == "array":
-                # Use first array field as fallback
-                mapping[field_name] = attachments
-                print(f"   📎 Fallback: Mapped attachments to first array field '{field_name}'")
-                return mapping
+                # Boost for CONTENT fields
+                if 'CONTENT' in category:
+                    score += 0.3
 
-        # No suitable field found
-        print(f"   ⚠️ No suitable attachment field found in schema")
+                # Boost for required fields
+                if required:
+                    score += 0.1
+
+                if score > best_score:
+                    best_score = score
+                    best_field = field_name
+
+            # Map to best field if score is good enough
+            if best_field and best_score > 0.5:
+                # Check if field is array or single value
+                field_class = field_classifications.get(best_field)
+                if hasattr(field_class, 'collection'):
+                    is_collection = field_class.collection
+                else:
+                    is_collection = field_class.get('collection', False)
+
+                if is_collection:
+                    # Array field: append or create list
+                    if best_field in mapping:
+                        mapping[best_field].append(attachment)
+                    else:
+                        mapping[best_field] = [attachment]
+                    print(f"   📎 Heuristic: Mapped {attachment} → {best_field}[] (score: {best_score:.2f})")
+                else:
+                    # Single field: direct assignment
+                    mapping[best_field] = attachment
+                    print(f"   📎 Heuristic: Mapped {attachment} → {best_field} (score: {best_score:.2f})")
+
+        if not mapping:
+            print(f"   ⚠️ No suitable attachment field found in schema")
+
         return mapping
 
     async def _step_information_review(self) -> Dict[str, Any]:

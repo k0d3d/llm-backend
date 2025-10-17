@@ -86,6 +86,27 @@ Each provider implements the `AIProvider` interface:
 - **AnthropicProvider**: For Claude models
 - **HuggingFaceProvider**: For open-source models
 
+### AI Agents (Form-Based Workflow)
+
+The orchestrator uses specialized AI agents for intelligent form handling:
+
+- **FormFieldClassifierAgent** (`form_field_classifier.py`): Classifies fields as CONTENT/CONFIG/HYBRID using GPT-4o-mini
+  - Determines which fields require user input vs keep defaults
+  - Handles nested objects recursively
+  - Generates user-friendly prompts for each field
+
+- **AttachmentMappingAgent** (`attachment_mapper.py`): Maps user attachments to form fields using GPT-4o-mini
+  - Semantic field matching: understands "image" = "input_image" = "img"
+  - File type detection from URLs: `.jpg` → image fields, `.mp3` → audio fields
+  - Handles both single string fields and array fields
+  - Prioritizes CONTENT fields over CONFIG fields
+  - Falls back to improved heuristic matching (0.9+ confidence for exact matches)
+
+- **FieldAnalyzerAgent** (`field_analyzer.py`): Analyzes field schemas to identify replaceable fields
+  - URL pattern analysis (placeholder detection)
+  - Field name analysis (suggests file input types)
+  - Used by AttachmentResolver for conflict resolution
+
 ## Data Flow
 
 ### Synchronous Flow (Auto Mode)
@@ -102,12 +123,17 @@ RunInput → HITLOrchestrator → Checkpoint → Human Review → Continue → P
 1. **Request Received**: API endpoint receives `RunInput` and `HITLConfig`
 2. **Provider Selection**: Based on `AgentTools` enum, appropriate provider is instantiated
 3. **Orchestrator Creation**: `HITLOrchestrator` is created with provider and config
-4. **Information Review**: Provider capabilities are analyzed, human review if needed
-5. **Payload Creation**: Provider creates payload from generic inputs
-6. **Payload Review**: Validation results presented, human review if needed
-7. **Execution**: Provider executes the request
-8. **Response Review**: Raw and processed responses shown, human review if needed
-9. **Completion**: Final result returned or sent to callback URL
+4. **Form Initialization**: (Form-based workflow only)
+   - Extract user attachments from prompt and chat history
+   - `FormFieldClassifierAgent` classifies fields as CONTENT/CONFIG/HYBRID
+   - `AttachmentMappingAgent` maps attachments to fields using semantic understanding
+   - Build form with reset logic and pre-populate fields from attachments
+5. **Information Review**: Provider capabilities analyzed, form completeness checked, human review if needed
+6. **Payload Creation**: Provider creates payload from generic inputs (using form values)
+7. **Payload Review**: Validation results presented, human review if needed
+8. **Execution**: Provider executes the request
+9. **Response Review**: Raw and processed responses shown, human review if needed
+10. **Completion**: Final result returned or sent to callback URL
 
 ## Configuration
 
