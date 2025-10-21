@@ -868,7 +868,7 @@ def create_state_manager(database_url: str) -> HITLStateStore:
     Returns:
         Appropriate state manager instance
     """
-    print(f"🔧 Creating state manager for URL: {database_url[:50]}...")
+    print(f"🔧 Creating state manager for URL: {database_url[:10]}...")
     parsed_url = urlparse(database_url)
     print(f"🔧 Parsed URL scheme: {parsed_url.scheme}")
     
