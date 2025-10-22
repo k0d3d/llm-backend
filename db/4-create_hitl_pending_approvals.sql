@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS hitl_pending_approvals (
     id SERIAL PRIMARY KEY,
     approval_id VARCHAR(36) UNIQUE NOT NULL,
-    run_id UUID NOT NULL,
+    run_id VARCHAR(36) NOT NULL,
     checkpoint_type VARCHAR(100) NOT NULL,
     context JSONB NOT NULL,
     user_id VARCHAR(255),
