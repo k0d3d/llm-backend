@@ -18,11 +18,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # open_ai_basic = ChatOpenAI(model="gpt-5-mini", temperature=0.8)
 open_ai_basic = LLM(
     model="gpt-5-nano",
-    temperature=0.5,
 )
 open_ai_turbo = LLM(
     model="gpt-5-mini",
-    temperature=0.5,
 )
 
 together_basic = LLM(
@@ -87,7 +85,6 @@ def llm_switcher(llm: SelectedLLM):
     if LLMProvider.OPENAI == provider:
         return LLM(
             model=name,
-            temperature=0.7,
         )
 
     if LLMProvider.CLAUDE == provider:
