@@ -36,7 +36,7 @@ class AttachmentMappingOutput(BaseModel):
 
 
 attachment_mapper_agent = Agent(
-    "openai:gpt-4o-mini",
+    "openai:gpt-5-mini",
     output_type=AttachmentMappingOutput,
     tools=[
         Tool(analyze_url_pattern, takes_ctx=False),

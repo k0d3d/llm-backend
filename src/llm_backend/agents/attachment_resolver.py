@@ -26,7 +26,7 @@ class AttachmentResolutionOutput(BaseModel):
 
 
 attachment_resolver_agent = Agent(
-    "openai:gpt-4o-mini",
+    "openai:gpt-5-mini",
     output_type=AttachmentResolutionOutput,
     system_prompt="""You are an AI agent that resolves attachment conflicts in model payloads.
 

@@ -153,7 +153,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=AttachmentDiscoveryContext,
             output_type=AttachmentDiscoveryResult,
             system_prompt=(
@@ -242,7 +242,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=FileRequirementContext,
             output_type=FileRequirementAnalysis,
             system_prompt=(
@@ -285,7 +285,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=PayloadValidationContext,
             output_type=PayloadValidationOutput,
             system_prompt=(
@@ -320,7 +320,7 @@ class ReplicateTeam:
         """Agent that generates the Replicate API payload from example input and prompt."""
         
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=ExampleInput,
             output_type=AgentPayload,
             system_prompt=(
@@ -350,7 +350,7 @@ class ReplicateTeam:
         """Agent that analyzes if the request can proceed or needs more information."""
         
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=InformationInputPayload,
             output_type=InformationInputResponse,
             system_prompt=(
@@ -385,7 +385,7 @@ class ReplicateTeam:
             return result
         
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=AgentPayload,
             system_prompt=(
                 """
@@ -408,7 +408,7 @@ class ReplicateTeam:
         """Agent that audits and formats the Replicate API response."""
         
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             system_prompt=(
                 """
                 You are a Response Audit Agent. Review the Replicate API response and format it
@@ -438,7 +438,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4o",
+            "openai:gpt-5",
             deps_type=FinalGuardContext,
             output_type=FinalGuardDecision,
             system_prompt=(

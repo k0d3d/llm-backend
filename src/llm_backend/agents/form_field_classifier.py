@@ -70,7 +70,7 @@ def create_classifier_agent() -> Agent[FormClassificationInput, FormClassificati
     """Create the form field classifier agent"""
 
     agent = Agent(
-        model="openai:gpt-4o",
+        model="openai:gpt-5",
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
         result_type=FormClassificationOutput,
         retries=2
