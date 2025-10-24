@@ -18,9 +18,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # open_ai_basic = ChatOpenAI(model="gpt-5-mini", temperature=0.8)
 open_ai_basic = LLM(
     model="gpt-5-nano",
+    additional_drop_params=["stop"] # 👈
 )
 open_ai_turbo = LLM(
     model="gpt-5-mini",
+    additional_drop_params=["stop"] # 👈
 )
 
 together_basic = LLM(
@@ -105,7 +107,6 @@ def llm_switcher(llm: SelectedLLM):
         return LLM(
             model=f"replicate/{name}",
             temperature=0.7,
-            stop="END",
             api_key=REPLICATE_API_TOKEN
         )
 
@@ -114,7 +115,6 @@ def llm_switcher(llm: SelectedLLM):
             model=f"together_ai/{name}",
             temperature=0.7,
             api_key=TOGETHER_AI_API_TOKEN,
-            stop=["<|eot_id|>","<|eom_id|>"],
 
         )
 
