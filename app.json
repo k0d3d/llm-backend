@@ -1,0 +1,32 @@
+{
+  "name": "tohju-llm-backend",
+  "description": "LLM Backend with HITL and RQ task queue",
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    },
+    "worker": {
+      "quantity": 2,
+      "size": "basic"
+    }
+  },
+  "env": {
+    "REDIS_URL": {
+      "description": "Redis connection URL for RQ",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "PostgreSQL database URL",
+      "required": true
+    },
+    "WEBSOCKET_URL": {
+      "description": "WebSocket server URL",
+      "required": true
+    },
+    "WEBSOCKET_API_KEY": {
+      "description": "WebSocket API key",
+      "required": true
+    }
+  }
+}

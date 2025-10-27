@@ -2,12 +2,15 @@
 
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Query
+from rq import Queue
 
 from llm_backend.agents.replicate_team import ReplicateTeam
 from llm_backend.core.types.common import AgentTools, RunInput
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
 from llm_backend.core.hitl.types import HITLConfig
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
+from llm_backend.workers.connection import get_redis_connection
+from llm_backend.workers.tasks import process_hitl_orchestrator
 
 
 router = APIRouter()
@@ -15,6 +18,10 @@ router = APIRouter()
 # Get shared HITL components
 state_manager = get_shared_state_manager()
 websocket_bridge = get_shared_websocket_bridge()
+
+# Initialize Redis Queue
+redis_conn = get_redis_connection()
+task_queue = Queue('default', connection=redis_conn)
 
 
 @router.post("/run")
@@ -91,13 +98,20 @@ async def run_replicate_team(
             user_id=run_input.user_id,
             session_id=run_input.session_id
         )
-        
-        # Execute HITL run in background
-        print("🔄 About to execute HITL orchestrator...")
-        background_tasks.add_task(orchestrator.execute)
-        
+
+        # Queue job instead of background task
+        print("🔄 Queuing HITL orchestrator job...")
+        job = task_queue.enqueue(
+            process_hitl_orchestrator,
+            run_input.dict(),
+            hitl_config.dict(),
+            "replicate",
+            job_timeout='30m'
+        )
+
         return {
             "run_id": run_id,
+            "job_id": job.id,
             "status": "queued",
             "message": "HITL run started successfully",
             "websocket_url": websocket_bridge.websocket_url,
@@ -158,12 +172,19 @@ async def run_replicate_team_hitl(
         user_id=user_id,
         session_id=session_id
     )
-    
-    # Execute run in background
-    background_tasks.add_task(orchestrator.execute)
-    
+
+    # Queue job instead of background task
+    job = task_queue.enqueue(
+        process_hitl_orchestrator,
+        run_input.dict(),
+        config.dict(),
+        "replicate",
+        job_timeout='30m'
+    )
+
     return {
         "run_id": run_id,
+        "job_id": job.id,
         "status": "queued",
         "message": "HITL run started successfully",
         "websocket_url": websocket_bridge.websocket_url if session_id else None,

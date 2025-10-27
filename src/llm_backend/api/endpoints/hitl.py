@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
+from rq import Queue
 import logging
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
@@ -13,6 +14,8 @@ from llm_backend.core.hitl.types import HITLConfig, HITLStatus
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
+from llm_backend.workers.connection import get_redis_connection
+from llm_backend.workers.tasks import process_hitl_orchestrator, process_hitl_resume
 
 router = APIRouter(prefix="/hitl", tags=["HITL"])
 
@@ -22,6 +25,10 @@ logger = logging.getLogger(__name__)
 # Get shared HITL components
 state_manager = get_shared_state_manager()
 websocket_bridge = get_shared_websocket_bridge()
+
+# Initialize Redis Queue
+redis_conn = get_redis_connection()
+task_queue = Queue('default', connection=redis_conn)
 
 
 class HITLRunRequest(BaseModel):
@@ -35,6 +42,7 @@ class HITLRunRequest(BaseModel):
 class HITLRunResponse(BaseModel):
     """Response from starting a HITL run"""
     run_id: str
+    job_id: str
     status: str
     message: str
     websocket_url: Optional[str] = None
@@ -145,14 +153,19 @@ async def start_hitl_run(
             user_id=request.user_id,
             session_id=request.session_id
         )
-        
-        # Execute run asynchronously
-        background_tasks.add_task(
-            orchestrator.execute
+
+        # Queue job instead of background task
+        job = task_queue.enqueue(
+            process_hitl_orchestrator,
+            request.run_input.dict(),
+            hitl_config.dict(),
+            provider_name,
+            job_timeout='30m'
         )
-        
+
         return HITLRunResponse(
             run_id=run_id,
+            job_id=job.id,
             status="queued",
             message="HITL run started successfully",
             websocket_url=websocket_bridge.websocket_url if request.session_id else None
@@ -367,41 +380,19 @@ async def resume_run(
                 detail=f"Cannot resume run in status: {state.status}"
             )
         
-        # Resume the run
-        await state_manager.resume_run(
-            run_id=run_id,
-            approval_response={"action": "resume", "timestamp": datetime.utcnow().isoformat()}
+        # Queue resume job instead of background task
+        job = task_queue.enqueue(
+            process_hitl_resume,
+            run_id,
+            {"action": "resume", "timestamp": datetime.utcnow().isoformat()},
+            job_timeout='30m'
         )
-        
-        # Continue execution in background
-        provider_name = state.original_input.get("provider", "replicate")
-        provider = ProviderRegistry.get_provider(provider_name)
-        
-        orchestrator = HITLOrchestrator(
-            provider=provider,
-            config=state.config,
-            run_input=state.original_input,
-            state_manager=state_manager,
-            websocket_bridge=websocket_bridge
-        )
-        
-        # Load the updated state with human edits
-        try:
-            orchestrator.state = state
-            print(f"🔄 Loaded state with human_edits: {getattr(state, 'human_edits', 'MISSING')}")
-            print(f"🔄 Loaded state with last_approval: {getattr(state, 'last_approval', 'MISSING')}")
-        except Exception as e:
-            print(f"❌ Error loading state: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to load orchestrator state: {str(e)}")
-        
-        background_tasks.add_task(
-            orchestrator.execute
-        )
-        
+
         return {
             "success": True,
             "message": "Run resumed successfully",
-            "run_id": run_id
+            "run_id": run_id,
+            "job_id": job.id
         }
         
     except HTTPException:
@@ -667,10 +658,28 @@ async def list_pending_approvals(user_id: Optional[str] = None) -> Dict[str, Any
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/jobs/{job_id}")
+async def get_job_status(job_id: str) -> Dict[str, Any]:
+    """Get status of a background job"""
+    from rq.job import Job
+
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+        return {
+            "job_id": job.id,
+            "status": job.get_status(),
+            "result": job.result if job.is_finished else None,
+            "error": str(job.exc_info) if job.is_failed else None,
+            "meta": job.meta
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Job not found: {str(e)}")
+
+
 @router.get("/providers")
 async def list_providers() -> Dict[str, Any]:
     """List available providers"""
-    
+
     try:
         providers = []
         for name, provider_class in ProviderRegistry._providers.items():
@@ -678,17 +687,17 @@ async def list_providers() -> Dict[str, Any]:
                 "name": name,
                 "class": provider_class.__name__,
                 "tools": [
-                    tool.value for tool, mapped_provider 
+                    tool.value for tool, mapped_provider
                     in ProviderRegistry._tool_mappings.items()
                     if mapped_provider == name
                 ]
             })
-        
+
         return {
             "providers": providers,
             "total": len(providers)
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

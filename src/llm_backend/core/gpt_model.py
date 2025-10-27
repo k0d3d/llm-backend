@@ -17,11 +17,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # open_ai_basic = ChatOpenAI(model="gpt-5-mini", temperature=0.8)
 open_ai_basic = LLM(
-    model="gpt-5-nano",
+    model="gpt-4.1-mini",
     additional_drop_params=["stop"] # 👈
 )
 open_ai_turbo = LLM(
-    model="gpt-5-mini",
+    model="gpt-4.1-mini",
     additional_drop_params=["stop"] # 👈
 )
 
@@ -58,7 +58,7 @@ replicate_turbo = LLM(
 )
 
 claude_basic = LLM(
-    model="claude-3-haiku-20240307",
+    model="anthropic/claude-4.5-sonnet",
     temperature=0.7,
     top_k=1,
     repetition_penalty=1.0,
