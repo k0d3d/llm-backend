@@ -1,5 +1,31 @@
 # RQ Task Queue Implementation for llm-backend
 
+## Quick Start
+
+### Development
+```bash
+# Option 1: Poetry (recommended for dev)
+poetry run fastapi dev src/main.py              # Terminal 1: Web server
+poetry run python -m llm_backend.workers.worker  # Terminal 2: Worker
+
+# Option 2: Docker Compose
+docker-compose up  # Includes web, worker, redis, postgres
+```
+
+### Production
+```bash
+# Deploy to Dokku
+git push dokku master
+
+# Scale workers
+dokku ps:scale llm-backend worker=5
+
+# View logs
+dokku logs llm-backend -t -p worker
+```
+
+---
+
 ## Current State Analysis
 
 **llm-backend** uses `BackgroundTasks` in two endpoints:
@@ -485,30 +511,225 @@ Add to dependencies:
 "rq (>=1.15.0,<2.0.0)",
 ```
 
-## Deployment to Dokku
+## Local Development
 
-### Prerequisites
+### Option 1: Poetry (Multiple Terminals) - Recommended
+
+**Best for active development with hot reload.**
+
+```bash
+# Terminal 1: Web server (with auto-reload)
+poetry run fastapi dev src/main.py
+
+# Terminal 2: Worker
+poetry run python -m llm_backend.workers.worker
+
+# Terminal 3: Second worker (optional)
+poetry run python -m llm_backend.workers.worker
+```
+
+**Requirements:**
+- Redis running (Upstash or `docker run -p 6379:6379 redis:7-alpine`)
+- PostgreSQL running (or use remote database)
+- Set environment variables in `.env`:
+  - `REDIS_URL`
+  - `DATABASE_URL`
+  - `WEBSOCKET_URL`
+  - `WEBSOCKET_API_KEY`
+  - `REPLICATE_API_TOKEN`
+
+---
+
+### Option 2: Docker Compose
+
+**Full stack with local Redis + PostgreSQL.**
+
+```bash
+# Start all services (web + 2 workers + redis + postgres)
+docker-compose up
+
+# Scale workers
+docker-compose up --scale worker=3
+
+# Rebuild after code changes
+docker-compose up --build
+```
+
+**File:** `docker-compose.yml`
+```yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: llm_backend
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+    depends_on:
+      - redis
+      - postgres
+    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+    depends_on:
+      - redis
+      - postgres
+    command: poetry run python -m llm_backend.workers.worker
+    deploy:
+      replicas: 2
+
+volumes:
+  redis_data:
+  postgres_data:
+```
+
+---
+
+### Option 3: Manual with Python
+
+```bash
+# Terminal 1: Redis (if not using Upstash)
+docker run -p 6379:6379 redis:7-alpine
+
+# Terminal 2: PostgreSQL (if not using remote)
+docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:15-alpine
+
+# Terminal 3: Web server
+export REDIS_URL=redis://localhost:6379/0
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_backend
+poetry run fastapi dev src/main.py
+
+# Terminal 4: Worker
+export REDIS_URL=redis://localhost:6379/0
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_backend
+poetry run python -m llm_backend.workers.worker
+```
+
+---
+
+## Production Deployment (Dokku)
+
+### Prerequisites (One-time Setup)
+
 ```bash
 # On Dokku server
+# 1. Create app
+dokku apps:create llm-backend
+
+# 2. Create and link Redis
+dokku redis:create tohju-redis
 dokku redis:link tohju-redis llm-backend
+
+# 3. Create and link PostgreSQL
+dokku postgres:create tohju-postgres
 dokku postgres:link tohju-postgres llm-backend
+
+# 4. Set environment variables
+dokku config:set llm-backend \
+  WEBSOCKET_URL=wss://your-websocket-url \
+  WEBSOCKET_API_KEY=your-api-key \
+  REPLICATE_API_TOKEN=your-replicate-token \
+  SENTRY_DSN=your-sentry-dsn
+
+# 5. Set worker scaling (optional, or use app.json)
+dokku ps:scale llm-backend web=1 worker=2
 ```
 
 ### Deploy
+
 ```bash
-# Commit changes
-git add .
-git commit -m "Implement RQ task queue for concurrent HITL processing"
+# From your local machine
+git remote add dokku dokku@your-server.com:llm-backend
+git push dokku master  # or main
 
-# Push to Dokku
-git push dokku master
+# Dokku will:
+# 1. Build Docker image
+# 2. Start web process (1 instance)
+# 3. Start worker process (2 instances)
+```
 
-# Scale workers
+### Production Architecture
+
+```
+┌────────────────┐
+│     Dokku      │
+├────────────────┤
+│                │
+│   web (1x)     │──┐
+│                │  │
+│  worker (2x)   │  ├──> Redis Queue
+│                │  │
+└────────────────┘──┘
+      ↓
+  Redis Service
+  PostgreSQL Service
+  WebSocket Service
+```
+
+**Procfile:**
+```
+web: poetry run fastapi run src/main.py --host 0.0.0.0 --port $PORT
+worker: poetry run python -m llm_backend.workers.worker
+```
+
+**Process Flow:**
+1. HITL request → `web` process → Start run + Enqueue job → Return run_id + job_id
+2. `worker` process picks up job → Executes HITL orchestrator → WebSocket notifications
+3. Human approval via WebSocket → Resume job → Continue execution
+4. Repeat for multiple concurrent HITL runs
+
+### Scaling Workers
+
+```bash
+# Scale up workers for high load
 dokku ps:scale llm-backend worker=5
 
-# Check logs
+# Scale down
+dokku ps:scale llm-backend worker=2
+
+# Check current scaling
+dokku ps:report llm-backend
+```
+
+### View Logs
+
+```bash
+# All logs
 dokku logs llm-backend -t
+
+# Worker logs only
 dokku logs llm-backend -t -p worker
+
+# Web logs only
+dokku logs llm-backend -t -p web
 ```
 
 ## Key Implementation Notes

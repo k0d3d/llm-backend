@@ -1,0 +1,14 @@
+services:
+  web:
+    environment:
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/llm_backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    environment:
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/llm_backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

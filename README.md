@@ -12,6 +12,9 @@ This project aims to create a flexible and adaptable multi-agent system where ag
 2.  Install dependencies using Poetry: `poetry install`
 3.  ... (more instructions to come)
 
+## Docker, Redis & Postgres Setup
+
+See `docs/REDIS_POSTGRES_AND_WORKER_SETUP.md` for instructions on running Redis and Postgres locally versus via Docker, scaling workers, and resolving port conflicts.
 
 ### Folder Structure
 

@@ -1,10 +1,8 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -12,6 +10,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    profiles:
+      - redis
 
   postgres:
     image: postgres:15-alpine
@@ -20,7 +20,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -28,40 +28,63 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    profiles:
+      - postgres
 
   web:
     build: .
     ports:
       - "8000:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    command: poetry run python -m llm_backend.workers.worker
+
+  # Redis-dependent versions (when using Docker Redis)
+  web-with-redis:
+    extends: web
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8000
-
-  worker:
-    build: .
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    profiles:
+      - redis
+
+  worker-with-redis:
+    extends: worker
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    command: poetry run python -m llm_backend.workers.worker
-    deploy:
-      replicas: 2
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    profiles:
+      - redis
 
 volumes:
   redis_data:

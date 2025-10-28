@@ -2,6 +2,7 @@
 import os
 import sys
 import logging
+import uuid
 from dotenv import load_dotenv
 from rq import Worker, Queue, Connection
 
@@ -20,12 +21,21 @@ def start_worker():
     """Start RQ worker"""
     redis_conn = get_redis_connection()
 
+    # Generate unique worker name
+    # Use WORKER_ID from env if set, otherwise generate UUID
+    worker_id = os.environ.get('WORKER_ID')
+    if not worker_id:
+        # Generate a truly unique ID each time
+        worker_id = str(uuid.uuid4())
+    
+    worker_name = f'worker-{worker_id}'
+
     with Connection(redis_conn):
         queues = ['default']
         worker = Worker(
             queues,
             connection=redis_conn,
-            name=f'worker-{os.getpid()}'
+            name=worker_name
         )
         logger.info(f"Starting RQ worker: {worker.name}")
         logger.info(f"Listening on queues: {queues}")
