@@ -70,10 +70,10 @@ def create_classifier_agent() -> Agent[FormClassificationInput, FormClassificati
     """Create the form field classifier agent"""
 
     agent = Agent(
-        model="openai:gpt-5",
+        model="openai:gpt-4o-mini",
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
-        result_type=FormClassificationOutput,
-        retries=2
+        output_type=FormClassificationOutput,
+        retries=3
     )
 
     return agent
@@ -157,7 +157,7 @@ async def classify_form_fields(
 
     try:
         result = await agent.run(input_data.model_dump())
-        classification_result = result.data
+        classification_result = result.output
 
         # Validate that we got actual classifications
         if not classification_result.field_classifications or len(classification_result.field_classifications) == 0:

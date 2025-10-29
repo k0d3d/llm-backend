@@ -58,6 +58,7 @@ class HITLConfig(BaseModel):
     require_approval_safety_flags: List[str] = ["nsfw", "pii", "copyright"]
     max_payload_changes: int = 5
     enable_streaming: bool = False
+    use_natural_language_hitl: bool = True  # Feature flag for NL conversation mode
 
 
 class StepEvent(BaseModel):

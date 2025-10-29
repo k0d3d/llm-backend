@@ -1,5 +1,24 @@
 """
-HITL Validation System - Pre-execution checkpoints and parameter validation
+HITL Validation System - Form validation and legacy checkpoint validation
+
+DEPRECATION NOTICE:
+===================
+The following components are DEPRECATED and only used as fallback:
+- HITLValidator class (replaced by form_field_classifier + NL conversation)
+- create_hitl_validation_summary() (replaced by NL prompt generation)
+- CheckpointType enum (replaced by form-based validation)
+- ValidationCheckpoint dataclass (replaced by form validation)
+
+ACTIVE COMPONENTS (still in use):
+=================================
+- validate_form_completeness() - Validates form has all required fields
+- validate_form_field_types() - Validates form field types
+- create_form_validation_summary() - Creates validation summary for forms
+
+For new implementations, use:
+- src/llm_backend/agents/form_field_classifier.py for field analysis
+- src/llm_backend/agents/nl_prompt_generator.py for user prompts
+- src/llm_backend/agents/nl_response_parser.py for parsing responses
 """
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -10,6 +29,7 @@ from .types import ValidationIssue
 
 
 class CheckpointType(Enum):
+    """DEPRECATED: Use form-based validation instead"""
     PARAMETER_REVIEW = "parameter_review"
     INPUT_VALIDATION = "input_validation"
     MODEL_SELECTION = "model_selection"
@@ -19,7 +39,7 @@ class CheckpointType(Enum):
 
 @dataclass
 class ValidationCheckpoint:
-    """Represents a validation checkpoint in the HITL workflow"""
+    """DEPRECATED: Represents a validation checkpoint in the HITL workflow"""
     checkpoint_type: CheckpointType
     title: str
     description: str
@@ -27,7 +47,7 @@ class ValidationCheckpoint:
     validation_issues: List[ValidationIssue]
     user_input_required: bool = False
     auto_fixable: bool = False
-    
+
     def is_blocking(self) -> bool:
         """Check if this checkpoint blocks execution"""
         return self.required and (
@@ -37,6 +57,7 @@ class ValidationCheckpoint:
 
 
 class HITLValidator:
+    """DEPRECATED: Use form_field_classifier + NL conversation instead"""
     """Comprehensive validation system for HITL workflows"""
     
     def __init__(self, run_input: RunInput, tool_config: Dict[str, Any]):
@@ -442,7 +463,10 @@ class HITLValidator:
 
 
 def create_hitl_validation_summary(checkpoints: List[ValidationCheckpoint]) -> Dict[str, Any]:
-    """Create a summary of validation results for HITL UI"""
+    """DEPRECATED: Create a summary of validation results for HITL UI
+
+    Use nl_prompt_generator instead for natural language messages.
+    """
     total_issues = sum(len(cp.validation_issues) for cp in checkpoints)
     blocking_issues = sum(len([issue for issue in cp.validation_issues if issue.severity == "error"])
                          for cp in checkpoints)

@@ -5,11 +5,15 @@
 ### Development
 ```bash
 # Option 1: Poetry (recommended for dev)
+export PYTHONPATH=$PWD/src
 poetry run fastapi dev src/main.py              # Terminal 1: Web server
 poetry run python -m llm_backend.workers.worker  # Terminal 2: Worker
 
-# Option 2: Docker Compose
-docker-compose up  # Includes web, worker, redis, postgres
+# Option 2: Docker Compose (with host Redis/DB)
+docker compose -f docker-compose.yml -f docker-compose.local.yml up web worker --scale worker=2
+
+# Option 3: Docker Compose (with local Redis/DB)
+docker compose --profile redis up
 ```
 
 ### Production
@@ -540,33 +544,93 @@ poetry run python -m llm_backend.workers.worker
 
 ---
 
-### Option 2: Docker Compose
+### Option 2: Docker Compose with Host Services (Recommended)
+
+**Uses Redis/PostgreSQL running on host machine (localhost).**
+
+This is configured via `docker-compose.local.yml` which uses `host.docker.internal` to connect to services on your host machine.
+
+```bash
+# Start web and worker (connects to host services)
+docker compose -f docker-compose.yml -f docker-compose.local.yml up web worker
+
+# Scale workers
+docker compose -f docker-compose.yml -f docker-compose.local.yml up web worker --scale worker=2
+
+# Run in background
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d web worker
+```
+
+**Requirements:**
+- Redis running on host: `redis://localhost:6379`
+- PostgreSQL running on host: `postgresql://localhost:5432/llm_backend`
+- Environment variables in `.env.docker` file
+
+**Note:** This setup uses:
+- `host.docker.internal` to access host services from Docker
+- Port 8811 for web server
+- Mounts `.env.docker` file for environment variables
+
+---
+
+### Option 3: Docker Compose with Local Services
 
 **Full stack with local Redis + PostgreSQL.**
 
 ```bash
-# Start all services (web + 2 workers + redis + postgres)
-docker-compose up
+# Start everything including local Redis and PostgreSQL
+docker-compose --profile redis up
 
 # Scale workers
-docker-compose up --scale worker=3
+docker-compose --profile redis up --scale worker=3
 
 # Rebuild after code changes
-docker-compose up --build
+docker-compose --profile redis up --build
 ```
 
-**File:** `docker-compose.yml`
+**File:** `docker-compose.yml` (CURRENT)
 ```yaml
-version: '3.8'
-
 services:
+  web:
+    build: .
+    ports:
+      - "8811:8811"
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8811
+
+  worker:
+    build: .
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
+      - WEBSOCKET_URL=${WEBSOCKET_URL}
+      - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    command: poetry run python -m llm_backend.workers.worker
+
+  # Optional: Local Redis (use with --profile redis)
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    profiles:
+      - redis
 
+  # Optional: Local PostgreSQL (use with --profile redis)
   postgres:
     image: postgres:15-alpine
     environment:
@@ -574,60 +638,80 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    profiles:
+      - redis
 
-  web:
-    build: .
-    ports:
-      - "8000:8000"
+  # Redis-dependent versions (when using Docker Redis)
+  web-with-redis:
+    extends: web
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
-    depends_on:
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    profiles:
       - redis
-      - postgres
-    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8000
 
-  worker:
-    build: .
+  worker-with-redis:
+    extends: worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/llm_backend
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
-    depends_on:
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+    profiles:
       - redis
-      - postgres
-    command: poetry run python -m llm_backend.workers.worker
-    deploy:
-      replicas: 2
 
 volumes:
   redis_data:
   postgres_data:
 ```
 
+**Note:**
+- Port 8811 is used for web (instead of 8000) to avoid conflicts
+- Redis on port 6380 (mapped from 6379) to avoid conflicts
+- PostgreSQL on port 5433 (mapped from 5432) to avoid conflicts
+- `PYTHONPATH=/app/src` is set for proper module imports
+
 ---
 
-### Option 3: Manual with Python
+### Option 4: Manual with Python
 
 ```bash
 # Terminal 1: Redis (if not using Upstash)
 docker run -p 6379:6379 redis:7-alpine
 
 # Terminal 2: PostgreSQL (if not using remote)
-docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:15-alpine
+docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=llm_backend postgres:15-alpine
 
 # Terminal 3: Web server
+export PYTHONPATH=$PWD/src
 export REDIS_URL=redis://localhost:6379/0
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_backend
 poetry run fastapi dev src/main.py
 
 # Terminal 4: Worker
+export PYTHONPATH=$PWD/src
 export REDIS_URL=redis://localhost:6379/0
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_backend
 poetry run python -m llm_backend.workers.worker

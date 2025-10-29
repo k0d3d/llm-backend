@@ -213,8 +213,19 @@ class ReplicateProvider(AIProvider):
             clean_prompt = re.sub(r'\s+', ' ', clean_prompt)
 
         # Strip breadcrumb markers inserted for attachment references
-        clean_prompt = re.sub(r'\s*:->\s*attached document:?\s*', ' ', clean_prompt, flags=re.IGNORECASE)
+        # Pattern breakdown: \s* (optional whitespace) :-> (literal) \s* (optional whitespace)
+        # attached (word) \s* (optional whitespace) document (word) :? (optional colon)
+        clean_prompt = re.sub(r'\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
+
+        # Also handle newline variations
+        clean_prompt = re.sub(r'\n\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
+
+        # Clean up any ":\s*$" at end of string (orphaned colons)
+        clean_prompt = re.sub(r':\s*$', '', clean_prompt)
+
+        # Clean up artifacts
         clean_prompt = re.sub(r'""', '"', clean_prompt)
+        clean_prompt = re.sub(r'\s+', ' ', clean_prompt)  # Collapse multiple spaces
 
         return clean_prompt.strip()
 
@@ -267,6 +278,20 @@ class ReplicateProvider(AIProvider):
         current_values = form_data.get("current_values", {})
 
         print(f"📋 Creating payload from form with {len(current_values)} fields")
+
+        # Clean prompt field if it exists - remove attachment mentions
+        if "prompt" in current_values and isinstance(current_values["prompt"], str):
+            # Get list of attachments from form data or orchestrator state
+            attachments = []
+            if hasattr(self, '_orchestrator') and self._orchestrator:
+                attachments = getattr(self._orchestrator.state, 'attachments', [])
+
+            original_prompt = current_values["prompt"]
+            cleaned_prompt = self._strip_attachment_mentions(original_prompt, attachments)
+
+            if cleaned_prompt != original_prompt:
+                print(f"🧹 Cleaned prompt: '{original_prompt[:50]}...' -> '{cleaned_prompt[:50]}...'")
+                current_values = {**current_values, "prompt": cleaned_prompt}
 
         # Apply schema coercion to ensure proper types
         payload_input = self._coerce_payload_to_schema(current_values)

@@ -4,7 +4,7 @@ import sys
 import logging
 import uuid
 from dotenv import load_dotenv
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
 
 # Load environment variables first
 load_dotenv()
@@ -27,19 +27,18 @@ def start_worker():
     if not worker_id:
         # Generate a truly unique ID each time
         worker_id = str(uuid.uuid4())
-    
+
     worker_name = f'worker-{worker_id}'
 
-    with Connection(redis_conn):
-        queues = ['default']
-        worker = Worker(
-            queues,
-            connection=redis_conn,
-            name=worker_name
-        )
-        logger.info(f"Starting RQ worker: {worker.name}")
-        logger.info(f"Listening on queues: {queues}")
-        worker.work(with_scheduler=False)
+    queues = ['default']
+    worker = Worker(
+        queues,
+        connection=redis_conn,
+        name=worker_name
+    )
+    logger.info(f"Starting RQ worker: {worker.name}")
+    logger.info(f"Listening on queues: {queues}")
+    worker.work(with_scheduler=False)
 
 if __name__ == '__main__':
     try:

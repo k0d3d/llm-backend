@@ -445,8 +445,16 @@ class HITLOrchestrator:
         description = self.provider.description if hasattr(self.provider, 'description') else ""
         field_metadata = self.provider.field_metadata if hasattr(self.provider, 'field_metadata') else None
 
+        # DEBUG LOGGING
+        print(f"🔍 DEBUG: Provider type: {type(self.provider).__name__}")
+        print(f"🔍 DEBUG: Provider config keys: {list(self.provider.config.keys()) if hasattr(self.provider, 'config') else 'N/A'}")
+        print(f"🔍 DEBUG: example_input from provider: {example_input}")
+        print(f"🔍 DEBUG: model_name: {model_name}")
+        print(f"🔍 DEBUG: Has example_input: {bool(example_input)}")
+
         if not example_input:
             print("⚠️ No example_input found, skipping form initialization")
+            print(f"⚠️ Provider attributes available: {[attr for attr in dir(self.provider) if not attr.startswith('_') and not callable(getattr(self.provider, attr))]}")
             self._add_step_event(HITLStep.FORM_INITIALIZATION, HITLStatus.COMPLETED, "system", "No example_input - skipped")
             return {"continue": True}
 
@@ -793,10 +801,8 @@ class HITLOrchestrator:
         return mapping
 
     async def _step_information_review(self) -> Dict[str, Any]:
-        """Form prompting checkpoint - prompt user for required form fields"""
+        """Information gathering checkpoint - supports both NL conversation and form modes"""
         self._transition_to_step(HITLStep.INFORMATION_REVIEW)
-
-        print("📋 Information Review: Form-based prompting")
 
         # Check if we have form data from initialization
         if not self.state.form_data:
@@ -807,6 +813,15 @@ class HITLOrchestrator:
         classification = self.state.form_data.get("classification", {})
         current_values = self.state.form_data.get("current_values", {})
         field_classifications = classification.get("field_classifications", {})
+
+        # NEW: Check if natural language mode is enabled
+        if self.config.use_natural_language_hitl:
+            print("💬 Information Review: Natural language conversation mode")
+            return await self._natural_language_information_review(
+                classification, current_values
+            )
+
+        print("📋 Information Review: Form-based prompting")
 
         # Build form field definitions for UI
         form_fields = []
@@ -988,6 +1003,145 @@ class HITLOrchestrator:
         print("✅ All required form fields filled - continuing")
         self._add_step_event(HITLStep.INFORMATION_REVIEW, HITLStatus.COMPLETED, "system", "Form complete - all required fields provided")
         return {"continue": True}
+
+    async def _natural_language_information_review(
+        self,
+        classification: Dict[str, Any],
+        current_values: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Natural language conversation-based information gathering"""
+        from llm_backend.agents.nl_prompt_generator import generate_natural_language_prompt
+        from llm_backend.agents.nl_response_parser import parse_natural_language_response
+
+        # Get model info
+        model_name = getattr(self.provider, 'model_name', 'the model')
+        model_description = getattr(self.provider, 'description', '')
+
+        # Generate natural language prompt
+        try:
+            nl_prompt = await generate_natural_language_prompt(
+                classification=classification,
+                current_values=current_values,
+                model_name=model_name,
+                model_description=model_description
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to generate NL prompt: {e}")
+            # Fall back to form-based if NL fails
+            self.config.use_natural_language_hitl = False
+            return await self._step_information_review()
+
+        # If all fields satisfied, auto-skip
+        if nl_prompt.all_fields_satisfied:
+            print(f"✅ All required fields satisfied - auto-skipping: {nl_prompt.message}")
+            self._add_step_event(
+                HITLStep.INFORMATION_REVIEW,
+                HITLStatus.COMPLETED,
+                "system",
+                "All required fields present - auto-approved"
+            )
+            return {"continue": True}
+
+        # Pause and request user input via natural language
+        print(f"⏸️ PAUSING for natural language input")
+        print(f"   Message: {nl_prompt.message}")
+        print(f"   Missing fields: {nl_prompt.missing_field_names}")
+
+        pause_response = self._create_pause_response(
+            step=HITLStep.INFORMATION_REVIEW,
+            message=nl_prompt.message,
+            actions_required=["respond_naturally"],
+            data={
+                "checkpoint_type": "information_request",
+                "conversation_mode": True,
+                "nl_prompt": nl_prompt.message,
+                "context": nl_prompt.context,
+                "missing_fields": nl_prompt.missing_field_names,
+            }
+        )
+
+        # Send WebSocket message for NL approval request
+        try:
+            if self.websocket_bridge:
+                approval_response = await self.websocket_bridge.request_human_approval(
+                    run_id=self.run_id,
+                    checkpoint_type="information_request",
+                    context=pause_response,
+                    user_id=getattr(self.run_input, 'user_id', None),
+                    session_id=getattr(self.run_input, 'session_id', None)
+                )
+                print("🔄 Received natural language response from user")
+
+                # Extract user's natural language message
+                user_message = approval_response.get("response", {}).get("message") or \
+                               approval_response.get("user_response", {}).get("message") or \
+                               approval_response.get("message", "")
+
+                if not user_message:
+                    print("⚠️ No message in approval response, checking for field updates")
+                    # Maybe user provided structured data directly (backward compat)
+                    updated_fields = approval_response.get("updated_fields", {})
+                    if updated_fields:
+                        self.state.form_data["current_values"].update(updated_fields)
+                        print(f"✅ Updated fields directly: {list(updated_fields.keys())}")
+                        return {"continue": True}
+                    else:
+                        print("❌ No usable response from user")
+                        return {"continue": False, "error": "No response provided"}
+
+                # Parse natural language response
+                print(f"🧠 Parsing user message: '{user_message}'")
+                parsed_values = await parse_natural_language_response(
+                    user_message=user_message,
+                    expected_schema=classification,
+                    current_values=current_values,
+                    model_description=model_description
+                )
+
+                print(f"📊 Parsing results:")
+                print(f"   Confidence: {parsed_values.confidence}")
+                print(f"   Extracted fields: {list(parsed_values.extracted_fields.keys())}")
+                print(f"   Ambiguities: {parsed_values.ambiguities}")
+
+                # Handle low confidence / ambiguities
+                if parsed_values.clarification_needed:
+                    print(f"❓ Clarification needed: {parsed_values.clarification_needed}")
+                    # TODO: Implement multi-turn clarification
+                    # For now, just proceed with what we have
+                    pass
+
+                # Merge parsed values into form data
+                self.state.form_data["current_values"].update(parsed_values.extracted_fields)
+                print(f"✅ Updated current_values with parsed fields")
+
+                # Log conversation for debugging
+                self._add_step_event(
+                    HITLStep.INFORMATION_REVIEW,
+                    HITLStatus.COMPLETED,
+                    "human",
+                    f"Natural language response: '{user_message}' (confidence: {parsed_values.confidence})",
+                    metadata={
+                        "parsed_fields": parsed_values.extracted_fields,
+                        "confidence": parsed_values.confidence,
+                        "ambiguities": parsed_values.ambiguities
+                    }
+                )
+
+                return {"continue": True}
+
+            else:
+                print("⚠️ No websocket bridge configured")
+                return {"continue": False, "error": "No websocket bridge"}
+
+        except Exception as e:
+            print(f"❌ Natural language review failed: {e}")
+            self._add_step_event(
+                HITLStep.INFORMATION_REVIEW,
+                HITLStatus.FAILED,
+                "system",
+                f"NL conversation failed: {str(e)}"
+            )
+            return {"continue": False, "error": str(e)}
 
     async def _legacy_information_review(self) -> Dict[str, Any]:
         """Legacy information review using validation checkpoints (fallback)"""
@@ -1490,17 +1644,21 @@ class HITLOrchestrator:
     def _should_pause_at_payload_review(self, payload, issues) -> bool:
         if self.config.policy == HITLPolicy.REQUIRE_HUMAN:
             return HITLStep.PAYLOAD_REVIEW in self.config.allowed_steps
-        
-        # Always pause for errors
-        if any(issue.severity == "error" for issue in issues):
+
+        # Only pause for NON-auto-fixable errors
+        non_fixable_errors = [
+            issue for issue in issues
+            if issue.severity == "error" and not issue.auto_fixable
+        ]
+        if non_fixable_errors:
             return True
-        
+
         if self.config.policy == HITLPolicy.AUTO_WITH_THRESHOLDS:
             # Check payload changes threshold
             changes = self._count_payload_changes(payload)
             if changes > self.config.max_payload_changes:
                 return True
-        
+
         return False
     
     def _should_pause_at_response_review(self, response, audited) -> bool:
@@ -1714,6 +1872,10 @@ class HITLOrchestrator:
             # Remove the URL from prompt
             start, end = match.span()
             cleaned_prompt = cleaned_prompt[:start] + cleaned_prompt[end:]
+
+        # Strip breadcrumb markers for attachments (e.g., ":-> attached document:")
+        cleaned_prompt = re.sub(r'\s*:->\s*attached\s+document:?', '', cleaned_prompt, flags=re.IGNORECASE)
+        cleaned_prompt = re.sub(r'\n\s*:->\s*attached\s+document:?', '', cleaned_prompt, flags=re.IGNORECASE)
 
         # Clean up extra whitespace
         cleaned_prompt = re.sub(r'\s+', ' ', cleaned_prompt).strip()

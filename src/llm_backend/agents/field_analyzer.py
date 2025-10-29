@@ -101,7 +101,7 @@ def analyze_field_name(field_name: str) -> Dict[str, Any]:
 
 
 field_analyzer_agent = Agent(
-    "openai:gpt-5-mini",
+    "openai:gpt-4.1-mini",
     output_type=FieldAnalysisOutput,
     tools=[
         Tool(analyze_url_pattern, takes_ctx=False),

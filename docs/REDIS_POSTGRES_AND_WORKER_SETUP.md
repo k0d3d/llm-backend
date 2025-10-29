@@ -25,7 +25,7 @@ docker compose \
 Notes:
 
 - `docker-compose.local.yml` maps `host.docker.internal` to the Docker host and points `REDIS_URL` and `DATABASE_URL` there, so you can reach existing services without binding container ports.
-- Because we no longer rely on host networking, `web` continues to publish `8000:8000`; access the API at `http://localhost:8000`.
+- Because we no longer rely on host networking, `web` continues to publish `8811:8811`; access the API at `http://localhost:8811`.
 
 ### Use the Dockerized Redis & Postgres Services
 

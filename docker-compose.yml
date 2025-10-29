@@ -34,23 +34,47 @@ services:
   web:
     build: .
     ports:
-      - "8000:8000"
+      - "8811:8811"
     environment:
+      - PYTHONPATH=/app/src
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
-    command: poetry run fastapi run src/main.py --host 0.0.0.0 --port 8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TOGETHER_AI_API_TOKEN=${TOGETHER_AI_API_TOKEN}
+      - TOGETHERAI_API_KEY=${TOGETHERAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - CORE_API_URL=${CORE_API_URL}
+      - TOHJU_NODE_API=${TOHJU_NODE_API}
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - COUCHDB_URL=${COUCHDB_URL}
+    volumes:
+      - ./src:/app/src:ro
+    command: poetry run fastapi dev src/main.py --host 0.0.0.0 --port 8811
 
   worker:
     build: .
     environment:
+      - PYTHONPATH=/app/src
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/llm_backend}
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TOGETHER_AI_API_TOKEN=${TOGETHER_AI_API_TOKEN}
+      - TOGETHERAI_API_KEY=${TOGETHERAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - CORE_API_URL=${CORE_API_URL}
+      - TOHJU_NODE_API=${TOHJU_NODE_API}
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - COUCHDB_URL=${COUCHDB_URL}
+    volumes:
+      - ./src:/app/src:ro
     command: poetry run python -m llm_backend.workers.worker
 
   # Redis-dependent versions (when using Docker Redis)
@@ -67,6 +91,15 @@ services:
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TOGETHER_AI_API_TOKEN=${TOGETHER_AI_API_TOKEN}
+      - TOGETHERAI_API_KEY=${TOGETHERAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - CORE_API_URL=${CORE_API_URL}
+      - TOHJU_NODE_API=${TOHJU_NODE_API}
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - COUCHDB_URL=${COUCHDB_URL}
     profiles:
       - redis
 
@@ -83,6 +116,15 @@ services:
       - WEBSOCKET_URL=${WEBSOCKET_URL}
       - WEBSOCKET_API_KEY=${WEBSOCKET_API_KEY}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TOGETHER_AI_API_TOKEN=${TOGETHER_AI_API_TOKEN}
+      - TOGETHERAI_API_KEY=${TOGETHERAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - CORE_API_URL=${CORE_API_URL}
+      - TOHJU_NODE_API=${TOHJU_NODE_API}
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - COUCHDB_URL=${COUCHDB_URL}
     profiles:
       - redis
 

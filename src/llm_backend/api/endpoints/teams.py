@@ -1,5 +1,5 @@
 
-
+import logging
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Query
 from rq import Queue
@@ -11,6 +11,8 @@ from llm_backend.core.hitl.types import HITLConfig
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.workers.connection import get_redis_connection
 from llm_backend.workers.tasks import process_hitl_orchestrator
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -69,8 +71,16 @@ async def run_replicate_team(
                     break
         
         tool_config = replicate_agent_tool_config.get("data", {}) if replicate_agent_tool_config else {}
-        # print(f"🔍 DEBUG: Final tool_config: {tool_config}")
-        
+
+        # Log tool configuration for debugging
+        logger.debug(
+            "Tool config extracted from request: model_name=%s, has_example_input=%s",
+            tool_config.get('model_name', 'MISSING'),
+            bool(tool_config.get('example_input'))
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("example_input: %s", tool_config.get('example_input', {}))
+
         # Create provider instance
         provider = ReplicateProvider(config={
             "name": tool_config.get("model_name", ""),
@@ -78,10 +88,13 @@ async def run_replicate_team(
             "example_input": tool_config.get("example_input", {}),
             "latest_version": tool_config.get("latest_version", "")
         })
+
+        logger.debug("Provider created with config keys: %s", list(provider.config.keys()))
         
         hitl_config = HITLConfig(
             policy="auto_with_thresholds",
-            allowed_steps=["information_review", "payload_review", "response_review"]
+            allowed_steps=["information_review", "payload_review", "response_review"],
+            use_natural_language_hitl=True  # Enable NL conversation mode
         )
         
         orchestrator = HITLOrchestrator(
@@ -100,7 +113,7 @@ async def run_replicate_team(
         )
 
         # Queue job instead of background task
-        print("🔄 Queuing HITL orchestrator job...")
+        logger.info("Queuing HITL orchestrator job for run_id=%s", run_id)
         job = task_queue.enqueue(
             process_hitl_orchestrator,
             run_input.dict(),
