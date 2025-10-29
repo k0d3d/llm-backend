@@ -14,6 +14,7 @@ from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLP
 from .websocket_bridge import WebSocketHITLBridge
 from .validation import HITLValidator, create_hitl_validation_summary
 from .chat_history_client import ChatHistoryClient
+from .hitl_message_client import HITLMessageClient
 from llm_backend.core.providers.base import AIProvider, ProviderResponse, AttributeDict
 from llm_backend.core.types.common import RunInput
 from llm_backend.agents.error_recovery_nl_agent import generate_error_recovery_message
@@ -33,12 +34,21 @@ class HITLOrchestrator:
         # Initialize chat history client for error recovery
         self.chat_history_client = ChatHistoryClient()
 
-        # Extract session_id for chat history fetching
+        # Initialize HITL message client for sending checkpoints via /from-llm
+        self.hitl_message_client = HITLMessageClient()
+
+        # Extract session_id and user_id for messaging
         self.session_id = None
+        self.user_id = None
         if hasattr(self.run_input, 'session_id'):
             self.session_id = self.run_input.session_id
         elif isinstance(self.run_input, dict):
             self.session_id = self.run_input.get('session_id')
+
+        if hasattr(self.run_input, 'user_id'):
+            self.user_id = self.run_input.user_id
+        elif isinstance(self.run_input, dict):
+            self.user_id = self.run_input.get('user_id')
 
         # Debug logging for persistence components
         print("🔧 HITLOrchestrator initialized:")
@@ -392,7 +402,7 @@ class HITLOrchestrator:
         start_time = time.time()
 
         try:
-            # Check if resuming from error recovery
+            # Check if resuming from error recovery or information request
             checkpoint_context = getattr(self.state, 'checkpoint_context', {})
             checkpoint_type = checkpoint_context.get('checkpoint_type')
 
@@ -408,6 +418,64 @@ class HITLOrchestrator:
 
                 # Re-execute API call step
                 return await self._step_api_execution()
+
+            elif checkpoint_type == "information_request":
+                print("🔧 Resuming from information request - parsing user's NL response")
+
+                # Refresh conversation history from database
+                conversation_history = await self._get_conversation_history()
+
+                # Get the user's latest message (their response to our information request)
+                if conversation_history and len(conversation_history) > 0:
+                    # Find the last user message
+                    user_message = None
+                    for msg in reversed(conversation_history):
+                        if msg.get("role") == "user":
+                            user_message = msg.get("content")
+                            break
+
+                    if user_message:
+                        from llm_backend.agents.nl_response_parser import parse_natural_language_response
+
+                        # Get current form state
+                        classification = self.state.form_data.get("classification", {})
+                        current_values = self.state.form_data.get("current_values", {})
+                        model_description = getattr(self.provider, 'description', '')
+
+                        # Parse the user's natural language response
+                        print(f"🧠 Parsing user message: '{user_message}'")
+                        parsed_values = await parse_natural_language_response(
+                            user_message=user_message,
+                            expected_schema=classification,
+                            current_values=current_values,
+                            model_description=model_description,
+                            conversation_history=conversation_history
+                        )
+
+                        print(f"📊 Parsing results:")
+                        print(f"   Confidence: {parsed_values.confidence}")
+                        print(f"   Extracted fields: {list(parsed_values.extracted_fields.keys())}")
+
+                        # Merge parsed values into form data
+                        self.state.form_data["current_values"].update(parsed_values.extracted_fields)
+                        print(f"✅ Updated current_values with parsed fields")
+
+                        # Log conversation for debugging
+                        self._add_step_event(
+                            HITLStep.INFORMATION_REVIEW,
+                            HITLStatus.COMPLETED,
+                            "human",
+                            f"Natural language response: '{user_message}' (confidence: {parsed_values.confidence})",
+                            metadata={
+                                "parsed_fields": parsed_values.extracted_fields,
+                                "confidence": parsed_values.confidence,
+                                "ambiguities": parsed_values.ambiguities
+                            }
+                        )
+
+                # Continue to next step
+                resume_index = self._determine_resume_index()
+                return await self._run_pipeline(start_index=resume_index)
 
             # Normal resume logic
             resume_index = self._determine_resume_index()
@@ -1150,93 +1218,31 @@ class HITLOrchestrator:
             }
         )
 
-        # Send WebSocket message for NL approval request
+        # Send HITL checkpoint as a message via /from-llm (MESSAGE-BASED HITL)
+        checkpoint_data = {
+            "run_id": self.run_id,
+            "nl_prompt": nl_prompt.message,
+            "context": nl_prompt.context,
+            "missing_fields": nl_prompt.missing_field_names,
+        }
+
         try:
-            if self.websocket_bridge:
-                approval_response = await self.websocket_bridge.request_human_approval(
-                    run_id=self.run_id,
-                    checkpoint_type="information_request",
-                    context=pause_response,
-                    user_id=getattr(self.run_input, 'user_id', None),
-                    session_id=getattr(self.run_input, 'session_id', None)
-                )
-                print("🔄 Received natural language response from user")
-
-                # Extract user's natural language message
-                user_message = approval_response.get("response", {}).get("message") or \
-                               approval_response.get("user_response", {}).get("message") or \
-                               approval_response.get("message", "")
-
-                if not user_message:
-                    print("⚠️ No message in approval response, checking for field updates")
-                    # Maybe user provided structured data directly (backward compat)
-                    updated_fields = approval_response.get("updated_fields", {})
-                    if updated_fields:
-                        self.state.form_data["current_values"].update(updated_fields)
-                        print(f"✅ Updated fields directly: {list(updated_fields.keys())}")
-                        return {"continue": True}
-                    else:
-                        print("❌ No usable response from user")
-                        return {"continue": False, "error": "No response provided"}
-
-                # Parse natural language response with conversation history
-                print(f"🧠 Parsing user message: '{user_message}'")
-
-                # Fetch conversation history for context-aware parsing
-                conversation_history = await self._get_conversation_history()
-
-                parsed_values = await parse_natural_language_response(
-                    user_message=user_message,
-                    expected_schema=classification,
-                    current_values=current_values,
-                    model_description=model_description,
-                    conversation_history=conversation_history  # ← Include history!
-                )
-
-                print(f"📊 Parsing results:")
-                print(f"   Confidence: {parsed_values.confidence}")
-                print(f"   Extracted fields: {list(parsed_values.extracted_fields.keys())}")
-                print(f"   Ambiguities: {parsed_values.ambiguities}")
-
-                # Handle low confidence / ambiguities
-                if parsed_values.clarification_needed:
-                    print(f"❓ Clarification needed: {parsed_values.clarification_needed}")
-                    # TODO: Implement multi-turn clarification
-                    # For now, just proceed with what we have
-                    pass
-
-                # Merge parsed values into form data
-                self.state.form_data["current_values"].update(parsed_values.extracted_fields)
-                print(f"✅ Updated current_values with parsed fields")
-
-                # Log conversation for debugging
-                self._add_step_event(
-                    HITLStep.INFORMATION_REVIEW,
-                    HITLStatus.COMPLETED,
-                    "human",
-                    f"Natural language response: '{user_message}' (confidence: {parsed_values.confidence})",
-                    metadata={
-                        "parsed_fields": parsed_values.extracted_fields,
-                        "confidence": parsed_values.confidence,
-                        "ambiguities": parsed_values.ambiguities
-                    }
-                )
-
-                return {"continue": True}
-
-            else:
-                print("⚠️ No websocket bridge configured")
-                return {"continue": False, "error": "No websocket bridge"}
-
-        except Exception as e:
-            print(f"❌ Natural language review failed: {e}")
-            self._add_step_event(
-                HITLStep.INFORMATION_REVIEW,
-                HITLStatus.FAILED,
-                "system",
-                f"NL conversation failed: {str(e)}"
+            await self.hitl_message_client.send_hitl_checkpoint(
+                session_id=self.session_id,
+                user_id=self.user_id or "unknown",
+                content=nl_prompt.message,
+                checkpoint_type="information_request",
+                checkpoint_data=checkpoint_data
             )
-            return {"continue": False, "error": str(e)}
+            print(f"✅ Sent information request checkpoint as message")
+        except Exception as e:
+            print(f"❌ Failed to send HITL checkpoint message: {e}")
+            pass
+
+        # Return pause response - user will respond when ready
+        # When user responds, their message will be detected by /to-llm handler (HITL context detection)
+        # and resume_from_state() will be called to continue the workflow
+        return pause_response
 
     async def _legacy_information_review(self) -> Dict[str, Any]:
         """Legacy information review using validation checkpoints (fallback)"""
@@ -1521,93 +1527,45 @@ class HITLOrchestrator:
 
         # Save state before pausing
         if self.state_manager:
-            await self.state_manager.save_state(self.run_id, self.state)
+            await self.state_manager.save_state(self.state)
 
-        # Create pause response
-        pause_response = self._create_pause_response(
+        # Send HITL checkpoint as a message via /from-llm
+        checkpoint_data = {
+            "run_id": self.run_id,
+            "error_type": "validation",
+            "error_field": field,
+            "current_value": current_value,
+            "valid_values": valid_values,
+        }
+
+        try:
+            await self.hitl_message_client.send_hitl_checkpoint(
+                session_id=self.session_id,
+                user_id=self.user_id or "unknown",
+                content=nl_error,
+                checkpoint_type="error_recovery",
+                checkpoint_data=checkpoint_data
+            )
+            print(f"✅ Sent error recovery checkpoint as message")
+
+        except Exception as e:
+            print(f"❌ Failed to send HITL checkpoint message: {e}")
+            # Fall back to returning pause response without sending message
+            pass
+
+        # Return pause response - user will respond when ready
+        return self._create_pause_response(
             step=HITLStep.API_CALL,
             message=nl_error,
             actions_required=["respond_naturally"],
             checkpoint_type="error_recovery",
-            conversation_mode=True,  # ← Enable NL mode
+            conversation_mode=True,
             data={
                 "error_type": "validation",
                 "error_field": field,
-                "current_value": current_value,
                 "valid_values": valid_values,
-                "conversation_history": self.state.conversation_history,
-                "failed_payload": payload  # Store for retry
             }
         )
-
-        # Request human approval with NL conversation
-        try:
-            if self.websocket_bridge:
-                approval_response = await self.websocket_bridge.request_human_approval(
-                    run_id=self.run_id,
-                    checkpoint_type="error_recovery",
-                    context=pause_response,
-                    user_id=getattr(self.run_input, 'user_id', None),
-                    session_id=getattr(self.run_input, 'session_id', None)
-                )
-                print("🔄 Received error recovery response from user")
-
-                # Extract user's natural language message
-                user_message = approval_response.get("response", {}).get("message") or \
-                               approval_response.get("user_response", {}).get("message") or \
-                               approval_response.get("message", "")
-
-                if not user_message:
-                    print("❌ No message in error recovery response")
-                    return {"continue": False, "error": "No response provided"}
-
-                # Track user's response in conversation
-                self._add_to_conversation(
-                    role="user",
-                    message=user_message,
-                    metadata={"step": "error_recovery", "field": field}
-                )
-
-                # Parse user's fix with full conversation context
-                conversation_history = await self._get_conversation_history()
-
-                # Get classification from form data
-                classification = self.state.form_data.get("classification", {})
-                current_values = self.state.form_data.get("current_values", {})
-
-                from llm_backend.agents.nl_response_parser import parse_natural_language_response
-
-                parsed_response = await parse_natural_language_response(
-                    user_message=user_message,
-                    expected_schema=classification,
-                    current_values=current_values,
-                    conversation_history=conversation_history
-                )
-
-                # Update form with corrected values
-                extracted_fields = parsed_response.extracted_fields
-                print(f"🔧 Extracted corrected values: {extracted_fields}")
-
-                self.state.form_data["current_values"].update(extracted_fields)
-
-                # Save state before retrying
-                if self.state_manager:
-                    await self.state_manager.save_state(self.run_id, self.state)
-
-                # Clear checkpoint context so resume doesn't treat this as error recovery
-                if hasattr(self.state, 'checkpoint_context'):
-                    self.state.checkpoint_context.pop('checkpoint_type', None)
-
-                # Retry API execution immediately
-                print(f"🔄 Retrying API call with corrected values...")
-                return await self._step_api_execution()
-
-        except Exception as e:
-            print(f"❌ Error during error recovery approval: {e}")
-            return {"continue": False, "error": str(e)}
-
-        # If no websocket bridge, just return the pause response
-        return pause_response
 
     async def _step_api_execution(self) -> Dict[str, Any]:
         """API execution step"""

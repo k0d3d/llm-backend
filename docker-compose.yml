@@ -100,6 +100,7 @@ services:
       - TOHJU_NODE_API=${TOHJU_NODE_API}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - COUCHDB_URL=${COUCHDB_URL}
+      - SESSION_API_M2M_TOKEN=${SESSION_API_M2M_TOKEN}
     profiles:
       - redis
 
@@ -125,6 +126,7 @@ services:
       - TOHJU_NODE_API=${TOHJU_NODE_API}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - COUCHDB_URL=${COUCHDB_URL}
+      - SESSION_API_M2M_TOKEN=${SESSION_API_M2M_TOKEN}
     profiles:
       - redis
 
