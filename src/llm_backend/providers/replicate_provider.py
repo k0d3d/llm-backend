@@ -274,8 +274,59 @@ class ReplicateProvider(AIProvider):
         self._orchestrator = orchestrator
         print(f"📋 Orchestrator linked to provider for form-based payload creation")
 
+    def _map_form_fields_to_api_fields(self, form_values: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deterministically map form field names to API field names.
+
+        Uses hitl_alias_metadata and example_input to find correct mappings.
+        This replaces the AI agent for form-based workflows.
+        """
+        api_payload = {}
+
+        print(f"🗺️ Mapping {len(form_values)} form fields to API fields")
+
+        for form_field, form_value in form_values.items():
+            # Default: try to find mapping in example_input or use same name
+            api_field = None
+
+            # Strategy 1: Check if form field exists directly in example_input
+            if form_field in self.example_input:
+                api_field = form_field
+                print(f"   ✅ Direct match: '{form_field}' → '{api_field}'")
+
+            # Strategy 2: Check hitl_alias_metadata for reverse mapping
+            if not api_field and self.hitl_alias_metadata:
+                for api_name, aliases in self.hitl_alias_metadata.items():
+                    if form_field in aliases:
+                        api_field = api_name
+                        print(f"   ✅ Alias match: '{form_field}' → '{api_field}' (via {api_name})")
+                        break
+
+            # Strategy 3: Common pattern mappings
+            if not api_field:
+                # prompt → input (most common text field mapping)
+                if form_field == "prompt" and "input" in self.example_input:
+                    api_field = "input"
+                    print(f"   ✅ Pattern match: 'prompt' → 'input'")
+                # image_input → file_input (common image field mapping)
+                elif form_field == "image_input" and "file_input" in self.example_input:
+                    api_field = "file_input"
+                    print(f"   ✅ Pattern match: 'image_input' → 'file_input'")
+                # image → input_image (another common pattern)
+                elif form_field == "image" and "input_image" in self.example_input:
+                    api_field = "input_image"
+                    print(f"   ✅ Pattern match: 'image' → 'input_image'")
+                # Fallback: keep original name
+                else:
+                    api_field = form_field
+                    print(f"   ⚠️ No mapping found, using original: '{form_field}'")
+
+            api_payload[api_field] = form_value
+
+        return api_payload
+
     async def _create_payload_from_form(self, form_data: Dict[str, Any], operation_type: OperationType, config: Dict) -> ReplicatePayload:
-        """Create payload directly from form data (bypasses intelligent agent)"""
+        """Create payload directly from form data using deterministic field mapping"""
         current_values = form_data.get("current_values", {})
 
         print(f"📋 Creating payload from form with {len(current_values)} fields")
@@ -294,8 +345,11 @@ class ReplicateProvider(AIProvider):
                 print(f"🧹 Cleaned prompt: '{original_prompt[:50]}...' -> '{cleaned_prompt[:50]}...'")
                 current_values = {**current_values, "prompt": cleaned_prompt}
 
+        # NEW: Use deterministic field name mapping
+        payload_input = self._map_form_fields_to_api_fields(current_values)
+
         # Apply schema coercion to ensure proper types
-        payload_input = self._coerce_payload_to_schema(current_values)
+        payload_input = self._coerce_payload_to_schema(payload_input)
 
         # Filter to only include fields from example_input schema
         payload_input = self._filter_payload_to_schema(payload_input)
@@ -312,11 +366,11 @@ class ReplicateProvider(AIProvider):
             operation_type=operation_type,
             model_version=self.latest_version,
             webhook_url=webhook_url,
-            provider_name=self.model_name  # ADD: Missing provider_name field
+            provider_name=self.model_name
         )
 
     async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
-        """Create Replicate-specific payload from form data or intelligent agent mapping"""
+        """Create Replicate-specific payload - uses deterministic mapping for forms, agent for text prompts"""
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
         import asyncio
@@ -324,14 +378,14 @@ class ReplicateProvider(AIProvider):
         if self.run_input is None:
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
-        # NEW: Check if we have form data from HITL orchestrator
+        # Check if we have structured form data from HITL orchestrator
         if hasattr(self, '_orchestrator') and self._orchestrator and hasattr(self._orchestrator.state, 'form_data'):
             form_data = self._orchestrator.state.form_data
             if form_data and form_data.get("current_values"):
-                print("📋 Using form data directly for payload creation")
+                print(f"📋 Form data detected - using deterministic field mapping (bypassing agent)")
                 return await self._create_payload_from_form(form_data, operation_type, config)
 
-        print("🤖 No form data available - using intelligent agent for payload creation")
+        print("🤖 No form data - using intelligent Pydantic AI agent for payload creation")
 
         normalized_attachments = self._normalize_attachments(attachments or [])
         
@@ -395,13 +449,13 @@ class ReplicateProvider(AIProvider):
             hitl_edits=hitl_edits,
             schema_metadata=self.field_metadata,
             hitl_field_metadata=self.hitl_alias_metadata,
+            structured_form_values=None,  # Not used - form data now uses deterministic mapping
         )
 
         try:
             replicate_agent = replicate_team.replicate_agent()
 
             async def run_agent() -> Any:
-                # print(f"🔍 Agent deps: {agent_input.model_dump()}")
                 return await replicate_agent.run(
                     "Generate an optimal Replicate payload using the provided inputs.",
                     deps=agent_input,
@@ -570,173 +624,35 @@ class ReplicateProvider(AIProvider):
         return updated_input
     
     def validate_payload(self, payload: ReplicatePayload, prompt: str, attachments: List[str]) -> List[ValidationIssue]:
-        """Enhanced validation with HITL parameter detection"""
+        """
+        Simplified validation that trusts form field classification.
+        Only checks for empty values in fields that exist in the payload.
+        """
         issues = []
-        
-        # Analyze required parameters for this model
-        required_params = self._analyze_model_requirements()
-        missing_critical = self._check_critical_parameters(payload, prompt, attachments, required_params)
-        
-        # Add critical missing parameter issues
-        for missing in missing_critical:
-            issues.append(ValidationIssue(
-                field=missing["field"],
-                issue=missing["issue"],
-                severity="error",
-                suggested_fix=missing["suggested_fix"],
-                auto_fixable=missing["auto_fixable"]
-            ))
-        
-        # Check if prompt is in payload when required
-        if prompt and self._requires_text_input():
-            prompt_found = any(prompt in str(value) for value in payload.input.values())
-            if not prompt_found:
+
+        # Check for empty values in fields that are present in the payload
+        # (Form classifier already determined which fields are required)
+        for field_name, field_value in payload.input.items():
+            if field_value is None or (isinstance(field_value, str) and not field_value.strip()):
                 issues.append(ValidationIssue(
-                    field="input",
-                    issue="Prompt not found in payload",
-                    severity="error",
-                    suggested_fix=f"Add '{prompt}' to one of: {list(payload.input.keys())}",
-                    auto_fixable=True
+                    field=field_name,
+                    issue=f"Field '{field_name}' is empty",
+                    severity="warning",  # Warning, not error - let Replicate API decide
+                    suggested_fix=f"Provide a value for {field_name}",
+                    auto_fixable=False
                 ))
-        
-        # Check if required files are missing
-        if self._requires_file_input() and not attachments:
-            file_type = self._get_required_file_type()
-            issues.append(ValidationIssue(
-                field="input",
-                issue=f"Required {file_type} file is missing",
-                severity="error",
-                suggested_fix=f"Upload a {file_type} file",
-                auto_fixable=False
-            ))
-        elif attachments:
-            file_found = any(att in str(payload.input) for att in attachments)
-            if not file_found:
+            elif isinstance(field_value, list) and len(field_value) == 0:
+                # Empty arrays might be intentional (optional fields)
                 issues.append(ValidationIssue(
-                    field="input",
-                    issue="Uploaded file not found in payload",
-                    severity="error",
-                    suggested_fix="Map uploaded file to appropriate field",
-                    auto_fixable=True
+                    field=field_name,
+                    issue=f"Field '{field_name}' is an empty array",
+                    severity="info",  # Just informational
+                    suggested_fix=f"Add items to {field_name} if needed",
+                    auto_fixable=False
                 ))
-        
-        # Check for empty required fields
-        for field_name, field_info in required_params.items():
-            if field_info["required"] and field_name in payload.input:
-                if not payload.input[field_name]:
-                    issues.append(ValidationIssue(
-                        field=field_name,
-                        issue=f"Required field {field_name} is empty",
-                        severity="error",
-                        suggested_fix=field_info["description"],
-                        auto_fixable=False
-                    ))
-        
+
         return issues
-    
-    def _analyze_model_requirements(self) -> dict:
-        """Analyze what parameters this specific model requires"""
-        model_lower = self.model_name.lower()
-        requirements = {}
-        
-        # Model-specific requirements
-        if "remove-bg" in model_lower or "background" in model_lower:
-            requirements.update({
-                "image": {"required": True, "type": "image", "description": "Upload an image to remove background from"},
-                "input_image": {"required": True, "type": "image", "description": "Source image for background removal"}
-            })
-        elif "whisper" in model_lower or "transcrib" in model_lower:
-            requirements.update({
-                "audio": {"required": True, "type": "audio", "description": "Upload an audio file to transcribe"},
-                "file": {"required": True, "type": "file", "description": "Audio file for transcription"}
-            })
-        elif "text-to-speech" in model_lower or "tts" in model_lower or "kokoro" in model_lower:
-            requirements.update({
-                "text": {"required": True, "type": "text", "description": "Enter text to convert to speech"},
-                "prompt": {"required": True, "type": "text", "description": "Text content for speech synthesis"}
-            })
-        elif "upscal" in model_lower or "enhance" in model_lower or "clarity" in model_lower:
-            requirements.update({
-                "image": {"required": True, "type": "image", "description": "Upload image to upscale/enhance"},
-                "input_image": {"required": True, "type": "image", "description": "Source image for enhancement"}
-            })
-        elif "nano-banana" in model_lower or "image-edit" in model_lower or "transform" in model_lower:
-            requirements.update({
-                "image": {"required": True, "type": "image", "description": "Upload image to transform"},
-                "prompt": {"required": True, "type": "text", "description": "Describe the transformation you want"},
-                "instruction": {"required": True, "type": "text", "description": "Instructions for image editing"}
-            })
-        
-        # Add general requirements from example_input
-        for key, value in self.example_input.items():
-            if key not in requirements:
-                requirements[key] = {
-                    "required": self._is_field_required(key, value),
-                    "type": self._infer_field_type(key, value),
-                    "description": self._get_field_description(key)
-                }
-        
-        return requirements
-    
-    def _check_critical_parameters(self, payload: ReplicatePayload, prompt: str, attachments: List[str], required_params: dict) -> list:
-        """Check for critical missing parameters that prevent execution"""
-        missing = []
-        
-        # Check for missing text input when required
-        if self._requires_text_input() and not prompt:
-            missing.append({
-                "field": "prompt",
-                "issue": "Text input is required but not provided",
-                "suggested_fix": "Provide a text prompt or instruction",
-                "auto_fixable": False
-            })
-        
-        # Check for missing file input when required
-        if self._requires_file_input() and not attachments:
-            file_type = self._get_required_file_type()
-            missing.append({
-                "field": "file_input",
-                "issue": f"{file_type.title()} file is required but not uploaded",
-                "suggested_fix": f"Upload a {file_type} file",
-                "auto_fixable": False
-            })
-        
-        return missing
-    
-    def _requires_text_input(self) -> bool:
-        """Check if this model requires text input"""
-        model_lower = self.model_name.lower()
-        text_required_models = ["nano-banana", "text-to-speech", "tts", "kokoro", "instruct", "chat"]
-        return any(keyword in model_lower for keyword in text_required_models)
-    
-    def _requires_file_input(self) -> bool:
-        """Check if this model requires file input"""
-        model_lower = self.model_name.lower()
-        file_required_models = ["remove-bg", "whisper", "upscal", "enhance", "clarity", "nano-banana", "image-edit"]
-        return any(keyword in model_lower for keyword in file_required_models)
-    
-    def _get_required_file_type(self) -> str:
-        """Get the type of file required by this model"""
-        model_lower = self.model_name.lower()
-        if any(keyword in model_lower for keyword in ["whisper", "transcrib", "speech"]):
-            return "audio"
-        elif any(keyword in model_lower for keyword in ["image", "upscal", "enhance", "remove-bg", "nano-banana"]):
-            return "image"
-        else:
-            return "file"
-    
-    def _is_field_required(self, key: str, value: any) -> bool:
-        """Determine if a field is required"""
-        key_lower = key.lower()
 
-        # Special case: system_prompt is optional configuration
-        if "system" in key_lower and "prompt" in key_lower:
-            return False
-
-        # Fields that are typically required when present
-        required_keywords = ["prompt", "text", "instruction", "image", "audio", "file", "input"]
-        return any(keyword in key_lower for keyword in required_keywords) and not value
-    
     def _infer_field_type(self, key: str, value: any) -> str:
         """Infer field type from key name and value"""
         key_lower = key.lower()

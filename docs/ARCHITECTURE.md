@@ -90,12 +90,12 @@ Each provider implements the `AIProvider` interface:
 
 The orchestrator uses specialized AI agents for intelligent form handling:
 
-- **FormFieldClassifierAgent** (`form_field_classifier.py`): Classifies fields as CONTENT/CONFIG/HYBRID using gpt-5-mini
+- **FormFieldClassifierAgent** (`form_field_classifier.py`): Classifies fields as CONTENT/CONFIG/HYBRID using gpt-4.1-mini-mini
   - Determines which fields require user input vs keep defaults
   - Handles nested objects recursively
   - Generates user-friendly prompts for each field
 
-- **AttachmentMappingAgent** (`attachment_mapper.py`): Maps user attachments to form fields using gpt-5-mini
+- **AttachmentMappingAgent** (`attachment_mapper.py`): Maps user attachments to form fields using gpt-4.1-mini-mini
   - Semantic field matching: understands "image" = "input_image" = "img"
   - File type detection from URLs: `.jpg` → image fields, `.mp3` → audio fields
   - Handles both single string fields and array fields

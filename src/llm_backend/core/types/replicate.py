@@ -37,6 +37,7 @@ class ExampleInput(BaseModel):
     hitl_edits: Optional[Dict[str, Any]] = None  # HITL human edits to integrate
     schema_metadata: Optional[Dict[str, Any]] = None  # Example input schema hints
     hitl_field_metadata: Optional[Dict[str, Any]] = None  # Alias/collection hints for edits
+    structured_form_values: Optional[Dict[str, Any]] = None  # NEW: Structured values from form-based HITL
 
 
 class AttachmentDiscoveryContext(BaseModel):

@@ -23,7 +23,7 @@ Implemented a natural language conversation system for HITL checkpoints that dra
 ## Changes Made
 
 ### 1. Bug Fixes
-- **Fixed**: `form_field_classifier` using non-existent model `gpt-5`
+- **Fixed**: `form_field_classifier` using non-existent model `gpt-4.1-mini`
 - **Changed to**: `gpt-4o-mini` with increased retries (2→3)
 - **File**: `src/llm_backend/agents/form_field_classifier.py`
 

@@ -153,7 +153,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=AttachmentDiscoveryContext,
             output_type=AttachmentDiscoveryResult,
             system_prompt=(
@@ -242,7 +242,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=FileRequirementContext,
             output_type=FileRequirementAnalysis,
             system_prompt=(
@@ -285,7 +285,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=PayloadValidationContext,
             output_type=PayloadValidationOutput,
             system_prompt=(
@@ -318,39 +318,51 @@ class ReplicateTeam:
 
     def replicate_agent(self) -> Agent:
         """Agent that generates the Replicate API payload from example input and prompt."""
-        
+
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=ExampleInput,
             output_type=AgentPayload,
             system_prompt=(
                 """
                 You are a Replicate Payload Generation Agent. Your job is to transform the user's prompt
                 and any provided files into a valid Replicate API payload that matches the example_input schema.
-                
+
                 Guidelines:
                 - Use the example_input as your schema template
                 - Integrate the user's prompt into appropriate text/prompt fields
                 - Apply any image_file or attachments to relevant image/file fields
                 - Honor any hitl_edits by overriding corresponding fields
-                - Preserve the structure and field names from example_input
                 - Review schema_metadata and hitl_field_metadata to understand which fields are collections
                   (e.g., image_input arrays) or nested dictionaries, and ensure your payload respects those
                   data shapes when applying edits
                 - Only include fields that exist in the example_input schema
-                
+
+                **NEW: Structured Form Values Support**
+                - If structured_form_values are provided, these are authoritative user-provided values from a form
+                - You MUST intelligently map structured_form_values field names to the correct example_input field names
+                - Common mappings:
+                  * "prompt" → "input" (for text input fields)
+                  * "image_input" → "file_input" (for image file fields)
+                  * "image" → "input_image" or "image_url" or "file_input"
+                - Use schema_metadata to understand the actual API field names
+                - When structured_form_values["prompt"] exists, find the correct text input field in example_input
+                  (could be "input", "prompt", "text", "instruction", etc.) and use that value
+                - When structured_form_values contains arrays (like image_input=[]), map to the correct array field
+                  in example_input (could be "file_input", "images", "input_images", etc.)
+
                 Respond strictly with the AgentPayload schema containing the transformed input.
                 """
             ),
         )
-        
+
         return agent
 
     def information_agent(self) -> Agent:
         """Agent that analyzes if the request can proceed or needs more information."""
         
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=InformationInputPayload,
             output_type=InformationInputResponse,
             system_prompt=(
@@ -385,7 +397,7 @@ class ReplicateTeam:
             return result
         
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=AgentPayload,
             system_prompt=(
                 """
@@ -408,7 +420,7 @@ class ReplicateTeam:
         """Agent that audits and formats the Replicate API response."""
         
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             system_prompt=(
                 """
                 You are a Response Audit Agent. Review the Replicate API response and format it
@@ -438,7 +450,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-5",
+            "openai:gpt-4.1-mini",
             deps_type=FinalGuardContext,
             output_type=FinalGuardDecision,
             system_prompt=(

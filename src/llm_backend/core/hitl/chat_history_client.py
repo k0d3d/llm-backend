@@ -76,15 +76,18 @@ class ChatHistoryClient:
                 message_data = {
                     "role": role,
                     "content": msg.get("content", ""),
-                    "timestamp": msg.get("created_at", "")
+                    # Support both camelCase (new M2M endpoint) and snake_case (legacy)
+                    "timestamp": msg.get("createdAt") or msg.get("created_at", "")
                 }
 
                 # Include props and message_type for HITL checkpoint detection
                 if include_props:
                     if msg.get("props"):
                         message_data["props"] = msg.get("props")
-                    if msg.get("message_type"):
-                        message_data["message_type"] = msg.get("message_type")
+                    # Support both camelCase and snake_case
+                    msg_type = msg.get("messageType") or msg.get("message_type")
+                    if msg_type:
+                        message_data["message_type"] = msg_type
 
                 formatted_messages.append(message_data)
 

@@ -84,8 +84,8 @@ docker run -p 8000:8000 --env-file .env tohju-llm-backend
 - Main routes: `POST /hitl/runs`, `GET /hitl/runs/{id}`, `POST /hitl/runs/{id}/approve`, `POST /hitl/runs/{id}/edit`
 
 **Form-Based Workflow** (`src/llm_backend/agents/`)
-- `FormFieldClassifierAgent` uses gpt-5-mini to classify fields in `example_input` as CONTENT/CONFIG/HYBRID
-- `AttachmentMappingAgent` uses gpt-5-mini for semantic attachment-to-field mapping (understands "image" = "input_image" = "img")
+- `FormFieldClassifierAgent` uses gpt-4.1-mini-mini to classify fields in `example_input` as CONTENT/CONFIG/HYBRID
+- `AttachmentMappingAgent` uses gpt-4.1-mini-mini for semantic attachment-to-field mapping (understands "image" = "input_image" = "img")
 - Intelligently resets form fields (arrays → [], content fields → null, config → keep defaults)
 - Pre-populates forms from user attachments using AI-powered field matching with heuristic fallback
 
@@ -110,7 +110,7 @@ docker run -p 8000:8000 --env-file .env tohju-llm-backend
 
 **Attachment Discovery**: The system no longer expects `document_url` in `RunInput`. Instead, `_gather_attachments()` inspects recent chat history for the `session_id`/`user_id` to assemble candidate assets. If a model requires an attachment and none are found, validation surfaces this as a blocking issue.
 
-**AI-Powered Attachment Mapping**: Uses `AttachmentMappingAgent` (gpt-5-mini) for semantic field matching:
+**AI-Powered Attachment Mapping**: Uses `AttachmentMappingAgent` (gpt-4.1-mini-mini) for semantic field matching:
 - Understands field name equivalence: "image" = "input_image" = "img" = "photo"
 - Detects file types from URLs: .jpg → image field, .mp3 → audio field
 - Handles both single string fields AND array fields (not just arrays)

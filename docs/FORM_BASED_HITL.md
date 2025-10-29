@@ -21,7 +21,7 @@ The agent classifies each field in `example_input` into categories:
 - **HYBRID** - Optional content → Reset but not required
 
 **Key Features:**
-- Uses gpt-5-mini for intelligent classification
+- Uses gpt-4.1-mini-mini for intelligent classification
 - Fallback heuristic classification if AI fails
 - Handles nested objects recursively
 - Generates user-friendly prompts for each field
@@ -33,7 +33,7 @@ The agent classifies each field in `example_input` into categories:
 The agent intelligently maps user-provided attachments (files/URLs) to form fields using semantic understanding:
 
 **Key Features:**
-- Uses gpt-5-mini for semantic field name matching
+- Uses gpt-4.1-mini-mini for semantic field name matching
 - Understands equivalence: "image" = "input_image" = "img" = "photo"
 - Detects file types from URLs: `.jpg` → image fields, `.mp3` → audio fields
 - Handles both single string fields AND array fields (not just arrays)

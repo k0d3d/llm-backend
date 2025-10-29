@@ -15,7 +15,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
-# open_ai_basic = ChatOpenAI(model="gpt-5-mini", temperature=0.8)
+# open_ai_basic = ChatOpenAI(model="gpt-4.1-mini-mini", temperature=0.8)
 open_ai_basic = LLM(
     model="gpt-4.1-mini",
     additional_drop_params=["stop"] # 👈
@@ -145,22 +145,22 @@ def get_available_llm_model():
         #     "kargs": {},
         # },
         {
-            "name": "gpt-5-mini",
+            "name": "gpt-4.1-mini-mini",
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },
         {
-            "name": "gpt-5-nano",
+            "name": "gpt-4.1-mini-nano",
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },
         {
-            "name": "gpt-5",
+            "name": "gpt-4.1-mini",
             "provider": LLMProvider.OPENAI,
             "kargs": {},
         },
         # {
-        #     "name": "gpt-5-mini",
+        #     "name": "gpt-4.1-mini-mini",
         #     "provider": LLMProvider.OPENAI,
         #     "kargs": {},
         # },

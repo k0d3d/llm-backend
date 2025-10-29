@@ -34,7 +34,7 @@ Implemented a natural language conversation system for HITL (Human-in-the-Loop) 
 **Change**:
 ```python
 # Before
-model="openai:gpt-5"  # Doesn't exist
+model="openai:gpt-4.1-mini"  # Doesn't exist
 retries=2
 
 # After

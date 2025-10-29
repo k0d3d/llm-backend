@@ -90,6 +90,9 @@ async def generate_natural_language_prompt(
     filled_fields = []
     optional_fields_info = []
 
+    print(f"🔍 DEBUG NL Generator: Analyzing {len(field_classifications)} fields")
+    print(f"🔍 DEBUG NL Generator: Current values: {current_values}")
+
     for field_name, field_class in field_classifications.items():
         # Handle both object and dict forms
         if hasattr(field_class, 'required'):
@@ -105,6 +108,8 @@ async def generate_natural_language_prompt(
 
         current_value = current_values.get(field_name)
         is_empty = current_value is None or current_value == "" or (isinstance(current_value, list) and len(current_value) == 0)
+
+        print(f"   Field '{field_name}': required={required}, value={current_value}, is_empty={is_empty}")
 
         if required:
             if is_empty:

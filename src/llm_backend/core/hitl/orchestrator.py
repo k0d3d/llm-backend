@@ -654,6 +654,7 @@ class HITLOrchestrator:
         # 1. Map prompt field (use cleaned prompt without URLs)
         if user_prompt_cleaned:
             user_provided_values['prompt'] = user_prompt_cleaned
+            print(f"🔍 DEBUG: Mapped user prompt to 'prompt' field: {user_prompt_cleaned[:100]}")
 
         # 2. Map attachments to appropriate fields
         if user_attachments:
@@ -663,6 +664,9 @@ class HITLOrchestrator:
             )
             user_provided_values.update(attachment_mapping)
             print(f"📎 Mapped {len(user_attachments)} attachments to fields: {list(attachment_mapping.keys())}")
+
+        print(f"🔍 DEBUG: Total user_provided_values: {list(user_provided_values.keys())}")
+        print(f"🔍 DEBUG: Values: {user_provided_values}")
 
         # Build form with reset logic applied AND user values
         form_data = self._build_form_from_classification(
@@ -960,6 +964,16 @@ class HITLOrchestrator:
 
     async def _step_information_review(self) -> Dict[str, Any]:
         """Information gathering checkpoint - supports both NL conversation and form modes"""
+        import traceback
+        print(f"\n{'='*80}")
+        print(f"🔍 DEBUG: _step_information_review() CALLED")
+        print(f"   Run ID: {self.run_id}")
+        print(f"   Current state status: {self.state.status}")
+        print(f"   Call stack:")
+        for line in traceback.format_stack()[-5:-1]:
+            print(f"      {line.strip()}")
+        print(f"{'='*80}\n")
+
         self._transition_to_step(HITLStep.INFORMATION_REVIEW)
 
         # Check if we have form data from initialization
@@ -971,6 +985,9 @@ class HITLOrchestrator:
         classification = self.state.form_data.get("classification", {})
         current_values = self.state.form_data.get("current_values", {})
         field_classifications = classification.get("field_classifications", {})
+
+        print(f"🔍 DEBUG: Current values from form_data: {current_values}")
+        print(f"🔍 DEBUG: Field classifications: {list(field_classifications.keys())}")
 
         # NEW: Check if natural language mode is enabled
         if self.config.use_natural_language_hitl:
@@ -1417,8 +1434,27 @@ class HITLOrchestrator:
 
             # Check for critical validation failures that require human intervention
             critical_issues = [issue for issue in validation_issues if issue.severity == "error" and not issue.auto_fixable]
-            
+
             if critical_issues:
+                # Send natural language message to user about validation failures
+                nl_message = self._format_validation_errors_naturally(critical_issues)
+
+                try:
+                    await self.hitl_message_client.send_hitl_checkpoint(
+                        session_id=self.session_id,
+                        user_id=self.user_id or "unknown",
+                        content=nl_message,
+                        checkpoint_type="payload_validation",
+                        checkpoint_data={
+                            "run_id": self.run_id,
+                            "critical_issues": [issue.dict() for issue in critical_issues],
+                            "missing_inputs": self._identify_missing_inputs(critical_issues),
+                        }
+                    )
+                    print(f"✅ Sent payload validation error message to user")
+                except Exception as e:
+                    print(f"❌ Failed to send payload validation message: {e}")
+
                 return self._create_pause_response(
                     step=HITLStep.PAYLOAD_REVIEW,
                     message="Critical validation failures require human intervention",
@@ -1998,10 +2034,56 @@ class HITLOrchestrator:
         
         return missing_inputs
     
+    def _format_validation_errors_naturally(self, critical_issues) -> str:
+        """Format validation errors as a natural language message for the user"""
+        if not critical_issues:
+            return "Everything looks good!"
+
+        # Group issues by type
+        missing_fields = []
+        invalid_values = []
+        other_issues = []
+
+        for issue in critical_issues:
+            if "missing" in issue.issue.lower() or "required" in issue.issue.lower():
+                missing_fields.append(issue)
+            elif "invalid" in issue.issue.lower() or "not found" in issue.issue.lower():
+                invalid_values.append(issue)
+            else:
+                other_issues.append(issue)
+
+        # Build natural language message
+        parts = []
+
+        if missing_fields:
+            if len(missing_fields) == 1:
+                parts.append(f"Oops! I need {missing_fields[0].suggested_fix or missing_fields[0].issue}")
+            else:
+                missing_list = ", ".join([issue.field for issue in missing_fields])
+                parts.append(f"Oops! I'm missing some required information: {missing_list}")
+
+        if invalid_values:
+            for issue in invalid_values:
+                parts.append(f"There's an issue with {issue.field}: {issue.issue}")
+                if issue.suggested_fix:
+                    parts.append(f"Try: {issue.suggested_fix}")
+
+        if other_issues:
+            for issue in other_issues:
+                parts.append(f"{issue.issue}")
+
+        # Add friendly closing
+        if len(critical_issues) > 1:
+            parts.append("Can you help me with these?")
+        else:
+            parts.append("Can you help with that?")
+
+        return " ".join(parts)
+
     def _suggest_remediation_actions(self, critical_issues) -> list:
         """Suggest specific actions to remediate critical validation issues"""
         actions = []
-        
+
         for issue in critical_issues:
             action = {
                 "field": issue.field,
@@ -2010,7 +2092,7 @@ class HITLOrchestrator:
                 "priority": "high" if issue.severity == "error" else "medium"
             }
             actions.append(action)
-        
+
         return actions
     
     def _auto_fix_payload_with_results(self, payload, validation_issues):
