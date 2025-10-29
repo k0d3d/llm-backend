@@ -13,8 +13,10 @@ from typing import Dict, Any, Optional, Callable, List
 from .types import HITLState, StepEvent, HITLConfig, HITLStep, HITLStatus, HITLPolicy
 from .websocket_bridge import WebSocketHITLBridge
 from .validation import HITLValidator, create_hitl_validation_summary
+from .chat_history_client import ChatHistoryClient
 from llm_backend.core.providers.base import AIProvider, ProviderResponse, AttributeDict
 from llm_backend.core.types.common import RunInput
+from llm_backend.agents.error_recovery_nl_agent import generate_error_recovery_message
 
 
 class HITLOrchestrator:
@@ -27,14 +29,25 @@ class HITLOrchestrator:
         self.run_id = str(uuid.uuid4())
         self.state_manager = state_manager
         self.websocket_bridge = websocket_bridge
-        
+
+        # Initialize chat history client for error recovery
+        self.chat_history_client = ChatHistoryClient()
+
+        # Extract session_id for chat history fetching
+        self.session_id = None
+        if hasattr(self.run_input, 'session_id'):
+            self.session_id = self.run_input.session_id
+        elif isinstance(self.run_input, dict):
+            self.session_id = self.run_input.get('session_id')
+
         # Debug logging for persistence components
         print("🔧 HITLOrchestrator initialized:")
         print(f"   - run_id: {self.run_id}")
+        print(f"   - session_id: {self.session_id}")
         print(f"   - state_manager: {'✅ Available' if state_manager else '❌ None'}")
         print(f"   - websocket_bridge: {'✅ Available' if websocket_bridge else '❌ None'}")
         print(f"   - provider: {provider.__class__.__name__ if provider else 'None'}")
-        
+
         # Set provider run input
         self.provider.set_run_input(self.run_input)
 
@@ -52,11 +65,11 @@ class HITLOrchestrator:
         # Track human edits across checkpoints
         if not hasattr(self.state, "human_edits") or self.state.human_edits is None:
             self.state.human_edits = {}
-        
+
         # Set expiration if configured
         if config.timeout_seconds > 0:
             self.state.expires_at = datetime.utcnow() + timedelta(seconds=config.timeout_seconds)
-        
+
         self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
     
     def _normalize_run_input(self, run_input):
@@ -125,6 +138,65 @@ class HITLOrchestrator:
         
         print(f"🔍 Collected human edits: {human_edits}")
         return human_edits
+
+    def _add_to_conversation(self, role: str, message: str, metadata: Optional[Dict] = None):
+        """
+        Add a message to the conversation history.
+
+        Args:
+            role: "user", "assistant", or "system"
+            message: The message content
+            metadata: Optional metadata (e.g., step, checkpoint_type, field)
+        """
+        if not hasattr(self.state, 'conversation_history'):
+            self.state.conversation_history = []
+
+        entry = {
+            "role": role,
+            "message": message,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        if metadata:
+            entry["metadata"] = metadata
+
+        self.state.conversation_history.append(entry)
+
+        print(f"💬 Added to conversation ({role}): {message[:100]}...")
+
+    async def _get_conversation_history(self) -> List[Dict[str, str]]:
+        """
+        Get full conversation history including:
+        1. Database chat history (from D1 via CF Workers)
+        2. Current HITL conversation (from state)
+
+        Returns combined and sorted conversation.
+        """
+        # Fetch from database
+        db_history = []
+        if self.session_id:
+            try:
+                db_history = await self.chat_history_client.get_session_history(
+                    self.session_id
+                )
+                print(f"📚 Fetched {len(db_history)} messages from database for session {self.session_id}")
+            except Exception as e:
+                print(f"⚠️ Failed to fetch chat history: {e}")
+                db_history = []
+        else:
+            print("ℹ️ No session_id available, skipping database chat history fetch")
+
+        # Get HITL conversation from state
+        hitl_history = getattr(self.state, 'conversation_history', [])
+        print(f"💬 HITL conversation has {len(hitl_history)} messages")
+
+        # Combine (database history is older, HITL history is recent)
+        combined = db_history + hitl_history
+
+        # Sort by timestamp
+        combined.sort(key=lambda x: x.get('timestamp', ''))
+
+        return combined
 
     def _apply_form_submission(self, approval_response: Optional[Dict[str, Any]]) -> None:
         """Handle form field submissions from user"""
@@ -320,6 +392,24 @@ class HITLOrchestrator:
         start_time = time.time()
 
         try:
+            # Check if resuming from error recovery
+            checkpoint_context = getattr(self.state, 'checkpoint_context', {})
+            checkpoint_type = checkpoint_context.get('checkpoint_type')
+
+            if checkpoint_type == "error_recovery":
+                print("🔧 Resuming from error recovery - user provided fix")
+
+                # Refresh conversation history from database
+                self.state.conversation_history = await self._get_conversation_history()
+
+                # The user's response has been parsed and current_values updated
+                # Now retry the API call with corrected values
+                print(f"🔄 Retrying API call with corrected values...")
+
+                # Re-execute API call step
+                return await self._step_api_execution()
+
+            # Normal resume logic
             resume_index = self._determine_resume_index()
             return await self._run_pipeline(start_index=resume_index)
         except Exception as e:
@@ -1089,13 +1179,18 @@ class HITLOrchestrator:
                         print("❌ No usable response from user")
                         return {"continue": False, "error": "No response provided"}
 
-                # Parse natural language response
+                # Parse natural language response with conversation history
                 print(f"🧠 Parsing user message: '{user_message}'")
+
+                # Fetch conversation history for context-aware parsing
+                conversation_history = await self._get_conversation_history()
+
                 parsed_values = await parse_natural_language_response(
                     user_message=user_message,
                     expected_schema=classification,
                     current_values=current_values,
-                    model_description=model_description
+                    model_description=model_description,
+                    conversation_history=conversation_history  # ← Include history!
                 )
 
                 print(f"📊 Parsing results:")
@@ -1370,7 +1465,150 @@ class HITLOrchestrator:
                     "suggested_fixes": self._suggest_payload_error_fixes(e)
                 }
             )
-    
+
+    async def _handle_validation_error_nl(
+        self,
+        response: ProviderResponse,
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle API validation error with natural language recovery.
+
+        This pauses execution and asks the user to fix the error conversationally.
+        """
+        print("🔧 Handling validation error with NL recovery...")
+
+        # Extract error details
+        error_details = response.metadata.get("error_details", {})
+        field = error_details.get("field")
+        message = error_details.get("message", "")
+        valid_values = error_details.get("valid_values", [])
+
+        # Get current value from payload
+        current_value = None
+        if field and isinstance(payload, dict):
+            # Try to find the field in payload structure
+            if hasattr(payload, 'input') and isinstance(payload.input, dict):
+                current_value = payload.input.get(field)
+            elif 'input' in payload:
+                current_value = payload['input'].get(field)
+
+        # Fetch full conversation history
+        conversation_history = await self._get_conversation_history()
+
+        # Generate natural language error message using AI
+        nl_error = await generate_error_recovery_message(
+            error_type="validation",
+            field=field,
+            current_value=current_value,
+            valid_values=valid_values,
+            conversation_history=conversation_history,
+            error_message=message
+        )
+
+        # Add error to conversation
+        self._add_to_conversation(
+            role="system",
+            message=f"API validation error: {message}",
+            metadata={"error_type": "validation", "field": field}
+        )
+
+        self._add_to_conversation(
+            role="assistant",
+            message=nl_error,
+            metadata={"step": "error_recovery", "field": field}
+        )
+
+        # Save state before pausing
+        if self.state_manager:
+            await self.state_manager.save_state(self.run_id, self.state)
+
+        # Create pause response
+        pause_response = self._create_pause_response(
+            step=HITLStep.API_CALL,
+            message=nl_error,
+            actions_required=["respond_naturally"],
+            checkpoint_type="error_recovery",
+            conversation_mode=True,  # ← Enable NL mode
+            data={
+                "error_type": "validation",
+                "error_field": field,
+                "current_value": current_value,
+                "valid_values": valid_values,
+                "conversation_history": self.state.conversation_history,
+                "failed_payload": payload  # Store for retry
+            }
+        )
+
+        # Request human approval with NL conversation
+        try:
+            if self.websocket_bridge:
+                approval_response = await self.websocket_bridge.request_human_approval(
+                    run_id=self.run_id,
+                    checkpoint_type="error_recovery",
+                    context=pause_response,
+                    user_id=getattr(self.run_input, 'user_id', None),
+                    session_id=getattr(self.run_input, 'session_id', None)
+                )
+                print("🔄 Received error recovery response from user")
+
+                # Extract user's natural language message
+                user_message = approval_response.get("response", {}).get("message") or \
+                               approval_response.get("user_response", {}).get("message") or \
+                               approval_response.get("message", "")
+
+                if not user_message:
+                    print("❌ No message in error recovery response")
+                    return {"continue": False, "error": "No response provided"}
+
+                # Track user's response in conversation
+                self._add_to_conversation(
+                    role="user",
+                    message=user_message,
+                    metadata={"step": "error_recovery", "field": field}
+                )
+
+                # Parse user's fix with full conversation context
+                conversation_history = await self._get_conversation_history()
+
+                # Get classification from form data
+                classification = self.state.form_data.get("classification", {})
+                current_values = self.state.form_data.get("current_values", {})
+
+                from llm_backend.agents.nl_response_parser import parse_natural_language_response
+
+                parsed_response = await parse_natural_language_response(
+                    user_message=user_message,
+                    expected_schema=classification,
+                    current_values=current_values,
+                    conversation_history=conversation_history
+                )
+
+                # Update form with corrected values
+                extracted_fields = parsed_response.extracted_fields
+                print(f"🔧 Extracted corrected values: {extracted_fields}")
+
+                self.state.form_data["current_values"].update(extracted_fields)
+
+                # Save state before retrying
+                if self.state_manager:
+                    await self.state_manager.save_state(self.run_id, self.state)
+
+                # Clear checkpoint context so resume doesn't treat this as error recovery
+                if hasattr(self.state, 'checkpoint_context'):
+                    self.state.checkpoint_context.pop('checkpoint_type', None)
+
+                # Retry API execution immediately
+                print(f"🔄 Retrying API call with corrected values...")
+                return await self._step_api_execution()
+
+        except Exception as e:
+            print(f"❌ Error during error recovery approval: {e}")
+            return {"continue": False, "error": str(e)}
+
+        # If no websocket bridge, just return the pause response
+        return pause_response
+
     async def _step_api_execution(self) -> Dict[str, Any]:
         """API execution step"""
         self._transition_to_step(HITLStep.API_CALL, HITLStatus.RUNNING)
@@ -1427,12 +1665,25 @@ class HITLOrchestrator:
         start_time = time.time()
         response = self.provider.execute(payload)
         execution_time = int((time.time() - start_time) * 1000)
-        
+
         self.state.provider_execution_time_ms = execution_time
         self.state.raw_response = response.raw_response
         self.state.processed_response = response.processed_response
-        
+
+        # Check for errors and handle recoverable ones
         if response.error:
+            error_details = response.metadata.get("error_details", {})
+            recoverable = response.metadata.get("recoverable", False)
+
+            print(f"❌ API error: {response.error}")
+            print(f"   Recoverable: {recoverable}")
+            print(f"   Error type: {error_details.get('error_type')}")
+
+            # Handle validation errors with NL recovery
+            if recoverable and error_details.get("error_type") == "validation":
+                return await self._handle_validation_error_nl(response, payload)
+
+            # Non-recoverable errors fail immediately
             raise Exception(f"Provider execution failed: {response.error}")
 
         # Don't send done_thinking here - Replicate webhook will handle completion status
@@ -1672,12 +1923,21 @@ class HITLOrchestrator:
         
         return False
     
-    def _create_pause_response(self, step: HITLStep, message: str, actions_required: list, data: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _create_pause_response(self, step: HITLStep, message: str, actions_required: list, data: Dict[str, Any] = None, checkpoint_type: str = None, conversation_mode: bool = False) -> Dict[str, Any]:
         self.state.status = HITLStatus.AWAITING_HUMAN
         self.state.pending_actions = actions_required
         self.state.approval_token = str(uuid.uuid4())
         self.state.updated_at = datetime.utcnow()
-        
+
+        # Store checkpoint metadata in state for resume logic
+        if not hasattr(self.state, 'checkpoint_context'):
+            self.state.checkpoint_context = {}
+
+        if checkpoint_type:
+            self.state.checkpoint_context['checkpoint_type'] = checkpoint_type
+        if conversation_mode:
+            self.state.checkpoint_context['conversation_mode'] = conversation_mode
+
         response = {
             "run_id": self.run_id,
             "status": "awaiting_human",
@@ -1688,10 +1948,15 @@ class HITLOrchestrator:
             "expires_at": self.state.expires_at.isoformat() if self.state.expires_at else None,
             "events_url": f"/hitl/runs/{self.run_id}/events"
         }
-        
+
+        if checkpoint_type:
+            response["checkpoint_type"] = checkpoint_type
+        if conversation_mode:
+            response["conversation_mode"] = conversation_mode
+
         if data:
             response.update(data)
-        
+
         return response
     
     def _transition_to_step(self, step: HITLStep, status: HITLStatus = HITLStatus.RUNNING):

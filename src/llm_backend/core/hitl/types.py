@@ -115,6 +115,24 @@ class HITLState(BaseModel):
     }
     """
 
+    # Conversation history for natural language HITL
+    conversation_history: List[Dict[str, Any]] = []
+    """
+    Full conversation history including:
+    - User's original messages
+    - System's NL questions
+    - User's NL responses
+    - Error messages and explanations
+    - Clarifications
+
+    Format:
+    [
+        {"role": "user", "message": "...", "timestamp": "...", "metadata": {...}},
+        {"role": "assistant", "message": "...", "timestamp": "...", "metadata": {...}},
+        {"role": "system", "message": "...", "timestamp": "...", "metadata": {...}}
+    ]
+    """
+
     # Audit trail
     step_history: List[StepEvent] = []
 

@@ -12,6 +12,7 @@ from llm_backend.core.providers.base import (
     ProviderCapabilities, ValidationIssue, OperationType
 )
 from llm_backend.tools.replicate_tool import run_replicate
+from llm_backend.providers.replicate_error_parser import ReplicateErrorParser
 
 
 class ReplicatePayload(ProviderPayload):
@@ -773,7 +774,7 @@ class ReplicateProvider(AIProvider):
     def execute(self, payload: ReplicatePayload) -> ProviderResponse:
         """Execute Replicate model request"""
         start_time = time.time()
-        
+
         try:
             # Use existing run_replicate function
             run, status_code = run_replicate(
@@ -785,29 +786,63 @@ class ReplicateProvider(AIProvider):
                 input=payload.input,
                 operation_type=payload.operation_type.value,
             )
-            
+
             execution_time = int((time.time() - start_time) * 1000)
-            
+
+            # Check for errors in response
+            if isinstance(run, dict) and run.get("error"):
+                print(f"❌ Replicate API error: {run.get('error_message')}")
+
+                # Parse error into structured format
+                error_details = ReplicateErrorParser.parse_error(
+                    status_code=run.get("status_code", 500),
+                    error_data=run.get("raw_error", {})
+                )
+
+                return ProviderResponse(
+                    raw_response=run,
+                    processed_response="",
+                    metadata={
+                        "error_details": error_details,
+                        "recoverable": error_details["recoverable"],
+                        "execution_time_ms": execution_time
+                    },
+                    execution_time_ms=execution_time,
+                    status_code=run.get("status_code"),
+                    error=error_details["message"]
+                )
+
+            # Success path
             return ProviderResponse(
                 raw_response=run,
                 processed_response=str(run),
                 metadata={
                     "model_version": payload.model_version,
                     "operation_type": payload.operation_type.value,
-                    "model_name": self.model_name
+                    "model_name": self.model_name,
+                    "execution_time_ms": execution_time
                 },
                 execution_time_ms=execution_time,
                 status_code=status_code
             )
-            
+
         except Exception as e:
             execution_time = int((time.time() - start_time) * 1000)
+            print(f"❌ Unexpected error in execute: {e}")
             return ProviderResponse(
                 raw_response=None,
                 processed_response="",
-                metadata={},
+                metadata={
+                    "error_details": {
+                        "error_type": "unknown",
+                        "recoverable": False,
+                        "message": str(e)
+                    },
+                    "execution_time_ms": execution_time
+                },
                 execution_time_ms=execution_time,
-                error=str(e)
+                error=str(e),
+                status_code=500
             )
     
     def audit_response(self, response: ProviderResponse) -> str:

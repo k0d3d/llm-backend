@@ -52,10 +52,17 @@ def run_replicate(
             "webhook": f"{TOHJU_NODE_API}/api/webhooks/onReplicateComplete",
         }
 
+        print(f"🚀 Making Replicate API call to: {url}")
+        print(f"📦 Request body: version={body.get('version')}, input_keys={list(body_input.keys())}")
+        print(f"🔑 API token present: {bool(REPLICATE_API_TOKEN)}")
+        print(f"📥 Webhook URL: {body.get('webhook')}")
+
         response = requests.post(url=url, headers=headers, json=body)
 
+        print(f"📡 Replicate API response: status={response.status_code}")
+
         # Check if the request was successful
-        if response.status_code == 201 or response.status_code == 200:
+        if response.status_code in [200, 201]:
             prediction = response.json()
             message_type = MessageType["REPLICATE_PREDICTION"]
             send_data_to_url(
@@ -67,8 +74,25 @@ def run_replicate(
                 crew_input=run_input,
                 message_type=message_type,
             )
+            return response.json(), response.status_code
 
-        return response.json(), response.status_code
+        # Handle error responses - return structured error
+        print(f"❌ API Error ({response.status_code}): {response.text}")
+
+        try:
+            error_json = response.json() if response.text else {}
+        except json.JSONDecodeError:
+            error_json = {"detail": response.text}
+
+        # Return structured error response
+        error_response = {
+            "error": True,
+            "status_code": response.status_code,
+            "error_message": error_json.get("detail", "") or error_json.get("error", ""),
+            "raw_error": error_json
+        }
+
+        return error_response, response.status_code
 
 class DictToClass(BaseModel, extra='allow'):
     """Input can be any schema ."""

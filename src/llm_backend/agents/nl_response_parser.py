@@ -107,7 +107,8 @@ async def parse_natural_language_response(
     user_message: str,
     expected_schema: Dict[str, Any],
     current_values: Dict[str, Any],
-    model_description: str = ""
+    model_description: str = "",
+    conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> ParsedFieldValues:
     """
     Parse natural language response to extract structured field values
@@ -117,6 +118,7 @@ async def parse_natural_language_response(
         expected_schema: Expected field schema (from form_field_classifier)
         current_values: Current field values for context
         model_description: Description of what the model does
+        conversation_history: Full conversation context for better parsing (NEW)
 
     Returns:
         ParsedFieldValues with extracted fields and confidence score
@@ -151,9 +153,22 @@ async def parse_natural_language_response(
         model_description=model_description
     )
 
+    # Build conversation context if provided
+    history_context = ""
+    if conversation_history:
+        history_lines = []
+        for msg in conversation_history[-10:]:  # Last 10 messages for context
+            role = msg.get("role", "user")
+            content = msg.get("message") or msg.get("content", "")
+            if content:
+                history_lines.append(f"{role}: {content[:200]}")
+
+        if history_lines:
+            history_context = "Recent conversation:\n" + "\n".join(history_lines) + "\n\n"
+
     # Build structured prompt for parsing
     user_prompt = f"""
-Parse the following user message and extract field values:
+{history_context}Parse the following user message and extract field values:
 
 User message: "{user_message}"
 
@@ -165,9 +180,13 @@ Current values (for context):
 
 Model description: {model_description or 'Not provided'}
 
-Extract any field values mentioned in the user's message. Be smart about semantic matching:
+Extract any field values mentioned in the user's message. Consider the conversation history, especially if they're fixing a validation error or clarifying a previous response.
+
+Be smart about semantic matching:
 - "3 variations" likely means num_outputs: 3
 - "in 4:3" or "4:3 format" means aspect_ratio: "4:3"
+- "square" means aspect_ratio: "1:1"
+- "Use 1:1" (in response to error about aspect_ratio) means aspect_ratio: "1:1"
 - Natural descriptions should go to prompt/instruction fields
 - Convert natural language to appropriate types
 
