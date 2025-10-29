@@ -26,8 +26,8 @@ RUN curl -sSL https://install.python-poetry.org | POETRY_HOME=/opt/poetry python
 
 COPY ./pyproject.toml ./poetry.lock* /app/
 
-# Install Python dependencies
-RUN poetry install --no-root
+# Install Python dependencies (without package, just dependencies)
+RUN poetry install --no-root --only main
 
 # Install additional packages
 RUN poetry run pip install pydantic-ai==0.2.14
@@ -38,6 +38,10 @@ RUN poetry self add poetry-plugin-dotenv@latest
 # Verify PostgreSQL dialect is available
 RUN python -c "import sqlalchemy; from sqlalchemy.dialects import postgresql; print('PostgreSQL dialect loaded successfully')"
 
+# Copy source code
 COPY . /app
+
+# Install the package itself (now that source code is present)
+RUN poetry install --only-root
 
 CMD ["bash", "start.sh"]
