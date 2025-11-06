@@ -42,25 +42,25 @@ async def run_replicate_team(
     """
     
     # Debug logging for request parameters
-    # print(f"🔍 DEBUG REQUEST: enable_hitl={enable_hitl}")
-    # print(f"🔍 DEBUG REQUEST: user_id={user_id}")
-    # print(f"🔍 DEBUG REQUEST: session_id={session_id}")
-    # print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
-    # print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
-    # print(f"🔍 DEBUG REQUEST: run_input dict={run_input.dict()}")
-    
+    print(f"🔍 DEBUG REQUEST: enable_hitl={enable_hitl}")
+    print(f"🔍 DEBUG REQUEST: user_id={user_id}")
+    print(f"🔍 DEBUG REQUEST: session_id={session_id}")
+    print(f"🔍 DEBUG REQUEST: run_input.prompt='{run_input.prompt}'")
+    print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config type={type(run_input.agent_tool_config)}")
+    print(f"🔍 DEBUG REQUEST: run_input.agent_tool_config={run_input.agent_tool_config}")
+
     if enable_hitl:
         # Use new HITL orchestrator
         from llm_backend.providers.replicate_provider import ReplicateProvider
-        
+
         # Get tool config for provider
         agent_tool_config = run_input.agent_tool_config
-        # print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
-        # print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: {AgentTools.REPLICATETOOL}")
-        # print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
-        
+        print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
+        print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: '{AgentTools.REPLICATETOOL}'")
+        print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
+
         replicate_agent_tool_config = agent_tool_config.get(AgentTools.REPLICATETOOL)
-        # print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
+        print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
         
         if replicate_agent_tool_config is None:
             # Try alternative key formats
@@ -70,26 +70,44 @@ async def run_replicate_team(
                     replicate_agent_tool_config = agent_tool_config.get(key)
                     break
         
-        tool_config = replicate_agent_tool_config.get("data", {}) if replicate_agent_tool_config else {}
+        tool_config = replicate_agent_tool_config if replicate_agent_tool_config else {}
+        print(f"🔍 DEBUG: tool_config (before extraction): {tool_config}")
+        print(f"🔍 DEBUG: tool_config keys: {list(tool_config.keys()) if tool_config else 'Empty'}")
+
+        # Handle both flat and nested data formats
+        # Format 1 (flat): {'name': 'flux-1.1-pro', 'example_input': {...}}
+        # Format 2 (nested): {'data': {'name': 'nano-banana', 'example_input': {...}}, 'name': 'replicate-agent-tool'}
+        if 'data' in tool_config and isinstance(tool_config.get('data'), dict) and tool_config['data']:
+            config_data = tool_config['data']
+            print(f"🔍 DEBUG: Extracted from nested 'data' key")
+        else:
+            config_data = tool_config
+            print(f"🔍 DEBUG: Using flat config structure")
+
+        print(f"🔍 DEBUG: config_data keys: {list(config_data.keys()) if config_data else 'Empty'}")
 
         # Log tool configuration for debugging
         logger.debug(
-            "Tool config extracted from request: model_name=%s, has_example_input=%s",
-            tool_config.get('model_name', 'MISSING'),
-            bool(tool_config.get('example_input'))
+            "Tool config extracted from request: name=%s, has_example_input=%s",
+            config_data.get('name', 'MISSING'),
+            bool(config_data.get('example_input'))
         )
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("example_input: %s", tool_config.get('example_input', {}))
+            logger.debug("example_input: %s", config_data.get('example_input', {}))
 
         # Create provider instance
-        provider = ReplicateProvider(config={
-            "name": tool_config.get("model_name", ""),
-            "description": tool_config.get("description", ""),
-            "example_input": tool_config.get("example_input", {}),
-            "latest_version": tool_config.get("latest_version", "")
-        })
+        provider_config = {
+            "name": config_data.get("name", ""),
+            "description": config_data.get("description", ""),
+            "example_input": config_data.get("example_input", {}),
+            "latest_version": config_data.get("latest_version", "")
+        }
+        print(f"🔍 DEBUG: provider_config being passed to ReplicateProvider: {provider_config}")
+
+        provider = ReplicateProvider(config=provider_config)
 
         logger.debug("Provider created with config keys: %s", list(provider.config.keys()))
+        print(f"🔍 DEBUG: Provider created with config keys: {list(provider.config.keys())}")
         
         hitl_config = HITLConfig(
             policy="auto_with_thresholds",
@@ -136,9 +154,15 @@ async def run_replicate_team(
         agent_tool_config = run_input.agent_tool_config
         replicate_agent_tool_config = agent_tool_config.get(AgentTools.REPLICATETOOL)
 
+        # Handle both flat and nested data formats
+        if 'data' in replicate_agent_tool_config and isinstance(replicate_agent_tool_config.get('data'), dict) and replicate_agent_tool_config['data']:
+            tool_config_data = replicate_agent_tool_config['data']
+        else:
+            tool_config_data = replicate_agent_tool_config
+
         replicate_team = ReplicateTeam(
             prompt=run_input.prompt,
-            tool_config=replicate_agent_tool_config.get("data", {}),
+            tool_config=tool_config_data,
             run_input=run_input,
             hitl_enabled=enable_hitl
         )

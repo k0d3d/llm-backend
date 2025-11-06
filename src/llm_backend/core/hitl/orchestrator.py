@@ -1265,7 +1265,14 @@ class HITLOrchestrator:
         """Legacy information review using validation checkpoints (fallback)"""
         # Extract tool config from the correct key structure
         agent_tool_config = self.run_input.agent_tool_config or {}
-        replicate_config = agent_tool_config.get("replicate-agent-tool", {}).get("data", {})
+        replicate_tool_config = agent_tool_config.get("replicate-agent-tool", {})
+
+        # Handle both flat and nested data formats
+        if 'data' in replicate_tool_config and isinstance(replicate_tool_config.get('data'), dict) and replicate_tool_config['data']:
+            replicate_config = replicate_tool_config['data']
+        else:
+            replicate_config = replicate_tool_config
+
         print(f"🔍 Orchestrator: Using tool_config: {replicate_config}")
 
         validator = HITLValidator(

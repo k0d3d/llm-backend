@@ -74,11 +74,19 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
                     break
 
         if replicate_tool_config and isinstance(replicate_tool_config, dict):
-            tool_config = replicate_tool_config.get("data", {})
+            # Handle both flat and nested data formats
+            # Format 1 (flat): {'name': 'flux-1.1-pro', 'example_input': {...}}
+            # Format 2 (nested): {'data': {'name': 'nano-banana', 'example_input': {...}}, 'name': 'replicate-agent-tool'}
+            if 'data' in replicate_tool_config and isinstance(replicate_tool_config.get('data'), dict) and replicate_tool_config['data']:
+                tool_config = replicate_tool_config['data']
+                logger.debug("Extracted config from nested 'data' key")
+            else:
+                tool_config = replicate_tool_config
+                logger.debug("Using flat config structure")
 
     logger.debug(
-        "Extracted tool_config: model_name=%s, has_example_input=%s",
-        tool_config.get('model_name', 'MISSING'),
+        "Extracted tool_config: name=%s, has_example_input=%s",
+        tool_config.get('name', 'MISSING'),
         bool(tool_config.get('example_input'))
     )
 
