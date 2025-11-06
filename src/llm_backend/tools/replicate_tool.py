@@ -50,6 +50,7 @@ def run_replicate(
             "input": body_input,
             "version": model_params.get("latest_version"),
             "webhook": f"{TOHJU_NODE_API}/api/webhooks/onReplicateComplete",
+            "webhook_events_filter": ["start", "completed"],  # Only send webhooks on start and completion
         }
 
         print(f"🚀 Making Replicate API call to: {url}")
