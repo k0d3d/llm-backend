@@ -118,8 +118,16 @@ class AttributeDict(dict):
         pass
     
     @abstractmethod
-    def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict) -> ProviderPayload:
-        """Create provider-specific payload from generic inputs"""
+    def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, conversation: Optional[List[Dict[str, str]]] = None) -> ProviderPayload:
+        """Create provider-specific payload from generic inputs
+
+        Args:
+            prompt: User's prompt text
+            attachments: List of attachment URLs
+            operation_type: Type of operation to perform
+            config: Provider-specific configuration
+            conversation: Optional conversation history for context
+        """
         pass
     
     @abstractmethod

@@ -369,7 +369,7 @@ class ReplicateProvider(AIProvider):
             provider_name=self.model_name
         )
 
-    async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, hitl_edits: Dict = None) -> ReplicatePayload:
+    async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, conversation: Optional[List[Dict[str, str]]] = None, hitl_edits: Dict = None) -> ReplicatePayload:
         """Create Replicate-specific payload - uses deterministic mapping for forms, agent for text prompts"""
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
@@ -450,6 +450,7 @@ class ReplicateProvider(AIProvider):
             schema_metadata=self.field_metadata,
             hitl_field_metadata=self.hitl_alias_metadata,
             structured_form_values=None,  # Not used - form data now uses deterministic mapping
+            conversation=conversation,  # Chat history for understanding references to previous prompts/settings
         )
 
         try:

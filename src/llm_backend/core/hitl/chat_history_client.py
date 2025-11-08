@@ -20,10 +20,10 @@ class ChatHistoryClient:
         self.base_url = base_url
         self.m2m_token = m2m_token
 
-        # Set up headers with M2M token
-        headers = {}
-        if self.m2m_token:
-            headers["X-M2M-Token"] = self.m2m_token
+        # Always send X-M2M-Token header (even if empty for dev mode)
+        headers = {
+            "X-M2M-Token": self.m2m_token
+        }
 
         self.client = httpx.AsyncClient(timeout=10.0, headers=headers)
 

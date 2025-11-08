@@ -60,7 +60,7 @@ class ReplicateTeam:
         # Include recent conversation snippets if available
         conversation = getattr(self.run_input, "conversation", None)
         if isinstance(conversation, list):
-            for message in conversation[-5:]:
+            for message in conversation[-10:]:
                 if isinstance(message, dict):
                     text = message.get("content") or message.get("text")
                     if isinstance(text, str) and text:
@@ -337,6 +337,18 @@ class ReplicateTeam:
                   (e.g., image_input arrays) or nested dictionaries, and ensure your payload respects those
                   data shapes when applying edits
                 - Only include fields that exist in the example_input schema
+
+                **Conversation History Context**
+                - If conversation history is provided (last 10 messages), analyze it for context
+                - User prompts may reference previous messages (e.g., "use the settings from before", "like I said earlier")
+                - Look for configuration values mentioned in previous messages:
+                  * Image generation settings (aspect_ratio, output_format, prompt_upsampling, etc.)
+                  * Prompts or descriptions from earlier in the conversation
+                  * File URLs or attachments shared previously
+                - When the current prompt references "history", "previous", "before", "earlier", or "that":
+                  * Search conversation for relevant settings/values
+                  * Apply those historical values to the current payload
+                - Prioritize: current prompt > conversation history > example_input defaults
 
                 **NEW: Structured Form Values Support**
                 - If structured_form_values are provided, these are authoritative user-provided values from a form

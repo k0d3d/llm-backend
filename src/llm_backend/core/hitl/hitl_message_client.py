@@ -21,10 +21,11 @@ class HITLMessageClient:
         self.base_url = base_url
         self.m2m_token = m2m_token
 
-        # Set up headers with M2M token
-        headers = {"Content-Type": "application/json"}
-        if self.m2m_token:
-            headers["X-M2M-Token"] = self.m2m_token
+        # Always send X-M2M-Token header (even if empty for dev mode)
+        headers = {
+            "Content-Type": "application/json",
+            "X-M2M-Token": self.m2m_token
+        }
 
         self.client = httpx.AsyncClient(timeout=30.0, headers=headers)
 

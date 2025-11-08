@@ -386,9 +386,20 @@ class HITLOrchestrator:
     async def execute(self) -> Dict[str, Any]:
         """Main execution flow with HITL checkpoints"""
         print(f"🚀 HITL Orchestrator starting execution for run_id: {self.run_id}")
-        
+
+        # Fetch and populate conversation history early so it's available for payload creation
+        if not self.run_input.conversation and self.session_id:
+            try:
+                print(f"📚 Fetching conversation history for session {self.session_id}")
+                conversation_history = await self._get_conversation_history()
+                if conversation_history:
+                    self.run_input.conversation = conversation_history
+                    print(f"✅ Populated run_input.conversation with {len(conversation_history)} messages")
+            except Exception as e:
+                print(f"⚠️ Failed to fetch conversation history during initialization: {e}")
+
         start_time = time.time()
-        
+
         try:
             return await self._run_pipeline(start_index=0)
         except Exception as e:
@@ -656,7 +667,19 @@ class HITLOrchestrator:
             user_provided_values['prompt'] = user_prompt_cleaned
             print(f"🔍 DEBUG: Mapped user prompt to 'prompt' field: {user_prompt_cleaned[:100]}")
 
-        # 2. Map attachments to appropriate fields
+        # 2. Extract field values from conversation history
+        if hasattr(self.run_input, 'conversation') and self.run_input.conversation:
+            field_names = list(example_input.keys())  # Get all possible field names
+            historical_values = self._extract_field_values_from_conversation(field_names)
+            if historical_values:
+                print(f"📚 Found {len(historical_values)} field values in conversation history")
+                # Add to user_provided_values (current prompt takes precedence)
+                for field, value in historical_values.items():
+                    if field not in user_provided_values:
+                        user_provided_values[field] = value
+                        print(f"   📝 From history: {field}={value}")
+
+        # 3. Map attachments to appropriate fields
         if user_attachments:
             attachment_mapping = await self._map_attachments_to_fields(
                 user_attachments,
@@ -1412,6 +1435,7 @@ class HITLOrchestrator:
                 attachments=attachments_to_use,
                 operation_type=operation_type,
                 config=self.run_input.agent_tool_config or {},
+                conversation=getattr(self.run_input, 'conversation', None),
                 hitl_edits=hitl_edits or None
             )
 
@@ -1653,6 +1677,7 @@ class HITLOrchestrator:
             attachments=attachments_to_use,
             operation_type=self._infer_operation_type(),
             config=self.run_input.agent_tool_config or {},
+            conversation=getattr(self.run_input, 'conversation', None),
             hitl_edits=hitl_edits or None
         )
 
@@ -2316,18 +2341,184 @@ class HITLOrchestrator:
         return 0
 
     def _attachments_from_chat_history(self) -> list:
-        """Placeholder: discover recent assets (e.g., images) from chat history.
+        """Discover recent media assets (images, videos, audio) from chat history.
 
-        This can be implemented by querying a message store using session_id/user_id,
-        or by passing recent messages in RunInput. For now, returns an empty list.
+        Extracts URLs from conversation history that appear to be media files.
+        Filters out HITL checkpoint messages to avoid processing system messages.
         """
+        attachments = []
+
         try:
-            # TODO: Integrate with your chat/message store to fetch recent assets
-            # Example: self.state_manager.get_recent_assets(self.run_input.session_id)
+            # Get conversation from run_input if available
+            conversation = getattr(self.run_input, "conversation", None)
+
+            if not conversation or not isinstance(conversation, list):
+                return []
+
+            # Media file extensions to look for
+            media_extensions = {
+                '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',  # Images
+                '.mp4', '.webm', '.mov', '.avi', '.mkv',  # Videos
+                '.mp3', '.wav', '.ogg', '.m4a', '.flac',  # Audio
+            }
+
+            # Process messages from most recent backwards (limit to last 10 for performance)
+            for message in reversed(conversation[-10:]):
+                if not isinstance(message, dict):
+                    continue
+
+                # Skip HITL checkpoint/system messages
+                message_type = message.get("message_type", "")
+                if "hitl" in message_type.lower() or "checkpoint" in message_type.lower():
+                    continue
+
+                role = message.get("role", "")
+                if role == "system":
+                    continue
+
+                # Extract content
+                content = message.get("content", "")
+                if not isinstance(content, str):
+                    continue
+
+                # Find all URLs in the message
+                import re
+                url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+                urls = re.findall(url_pattern, content)
+
+                for url in urls:
+                    # Clean trailing punctuation
+                    url = url.rstrip('.,;:!?)')
+
+                    # Check if it's a media file
+                    url_lower = url.lower()
+                    if any(url_lower.endswith(ext) for ext in media_extensions):
+                        if url not in attachments:
+                            attachments.append(url)
+                            print(f"📎 Found attachment in chat history: {url}")
+
+            return attachments
+
+        except Exception as e:
+            print(f"⚠️ Error extracting attachments from chat history: {e}")
             return []
-        except Exception:
-            return []
-    
+
+    def _extract_field_values_from_conversation(self, field_names: List[str]) -> Dict[str, Any]:
+        """
+        Parse conversation history for field=value patterns.
+
+        Looks for patterns like:
+        - field_name=value
+        - field_name: value
+        - field_name | value
+        - field name = value (with spaces)
+
+        Extracts and parses values (booleans, numbers, strings).
+        """
+        extracted_values = {}
+
+        try:
+            # Get conversation from run_input
+            conversation = getattr(self.run_input, "conversation", None)
+
+            if not conversation or not isinstance(conversation, list):
+                return {}
+
+            # Process last 10 messages (most recent context)
+            recent_messages = conversation[-10:]
+
+            for message in recent_messages:
+                if not isinstance(message, dict):
+                    continue
+
+                # Skip system/HITL messages
+                role = message.get("role", "")
+                if role == "system":
+                    continue
+
+                message_type = message.get("message_type", "")
+                if "hitl" in message_type.lower() or "checkpoint" in message_type.lower():
+                    continue
+
+                content = message.get("content", "")
+                if not isinstance(content, str):
+                    continue
+
+                # Try to match each field name
+                for field_name in field_names:
+                    # Skip if we already found this field
+                    if field_name in extracted_values:
+                        continue
+
+                    # Normalize field name for matching (handle snake_case variations)
+                    field_variations = [
+                        field_name,
+                        field_name.replace('_', ' '),  # aspect_ratio → aspect ratio
+                        field_name.replace('_', '-'),  # aspect_ratio → aspect-ratio
+                    ]
+
+                    for field_variant in field_variations:
+                        # Patterns to match: field=value, field: value, field | value
+                        import re
+                        # Case-insensitive matching
+                        patterns = [
+                            rf'\b{re.escape(field_variant)}\s*=\s*([^\s,;]+)',  # field=value
+                            rf'\b{re.escape(field_variant)}\s*:\s*([^\s,;]+)',  # field: value
+                            rf'\b{re.escape(field_variant)}\s*\|\s*([^\s,;]+)',  # field | value
+                        ]
+
+                        for pattern in patterns:
+                            match = re.search(pattern, content, re.IGNORECASE)
+                            if match:
+                                raw_value = match.group(1).strip()
+
+                                # Parse the value
+                                parsed_value = self._parse_field_value(raw_value)
+
+                                if parsed_value is not None:
+                                    extracted_values[field_name] = parsed_value
+                                    print(f"📚 Extracted from conversation: {field_name}={parsed_value}")
+                                    break  # Found match, no need to check other patterns
+
+                        if field_name in extracted_values:
+                            break  # Found match, no need to check other variations
+
+            return extracted_values
+
+        except Exception as e:
+            print(f"⚠️ Error extracting field values from conversation: {e}")
+            return {}
+
+    def _parse_field_value(self, raw_value: str) -> Any:
+        """Parse a string value into appropriate Python type."""
+        raw_value = raw_value.strip().rstrip(',;.')
+
+        # Try boolean
+        if raw_value.lower() in ('true', 'yes', 'on', '1'):
+            return True
+        if raw_value.lower() in ('false', 'no', 'off', '0'):
+            return False
+
+        # Try integer
+        try:
+            return int(raw_value)
+        except ValueError:
+            pass
+
+        # Try float
+        try:
+            return float(raw_value)
+        except ValueError:
+            pass
+
+        # Return as string (remove quotes if present)
+        if raw_value.startswith('"') and raw_value.endswith('"'):
+            return raw_value[1:-1]
+        if raw_value.startswith("'") and raw_value.endswith("'"):
+            return raw_value[1:-1]
+
+        return raw_value
+
     def _suggest_payload_error_fixes(self, error: Exception) -> list:
         """Suggest fixes for payload creation/validation errors"""
         fixes = []
