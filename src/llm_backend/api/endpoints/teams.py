@@ -55,12 +55,12 @@ async def run_replicate_team(
 
         # Get tool config for provider
         agent_tool_config = run_input.agent_tool_config
-        print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
-        print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: '{AgentTools.REPLICATETOOL}'")
-        print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
+        # print(f"🔍 DEBUG: agent_tool_config keys: {list(agent_tool_config.keys()) if agent_tool_config else 'None'}")
+        # print(f"🔍 DEBUG: AgentTools.REPLICATETOOL value: '{AgentTools.REPLICATETOOL}'")
+        # print(f"🔍 DEBUG: Full agent_tool_config: {agent_tool_config}")
 
         replicate_agent_tool_config = agent_tool_config.get(AgentTools.REPLICATETOOL)
-        print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
+        # print(f"🔍 DEBUG: replicate_agent_tool_config: {replicate_agent_tool_config}")
         
         if replicate_agent_tool_config is None:
             # Try alternative key formats
@@ -71,8 +71,8 @@ async def run_replicate_team(
                     break
         
         tool_config = replicate_agent_tool_config if replicate_agent_tool_config else {}
-        print(f"🔍 DEBUG: tool_config (before extraction): {tool_config}")
-        print(f"🔍 DEBUG: tool_config keys: {list(tool_config.keys()) if tool_config else 'Empty'}")
+        # print(f"🔍 DEBUG: tool_config (before extraction): {tool_config}")
+        # print(f"🔍 DEBUG: tool_config keys: {list(tool_config.keys()) if tool_config else 'Empty'}")
 
         # Handle both flat and nested data formats
         # Format 1 (flat): {'name': 'flux-1.1-pro', 'example_input': {...}}

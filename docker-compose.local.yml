@@ -5,6 +5,7 @@ services:
     environment:
       - REDIS_URL=redis://host.docker.internal:6379/0
       - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/llm_backend
+      - SESSION_API_M2M_TOKEN=${SESSION_API_M2M_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -14,5 +15,6 @@ services:
     environment:
       - REDIS_URL=redis://host.docker.internal:6379/0
       - DATABASE_URL=postgresql://user:password@host.docker.internal:5432/llm_backend
+      - SESSION_API_M2M_TOKEN=${SESSION_API_M2M_TOKEN}
     extra_hosts:
       - "host.docker.internal:host-gateway"
