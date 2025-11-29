@@ -1472,17 +1472,29 @@ class HITLOrchestrator:
             operation_type = self._infer_operation_type()
             hitl_edits = self._collect_hitl_edits()
 
-            # Determine attachments source: form data (if available) or full discovery
+            # Use cleaned prompt and attachments from form if available
+            prompt_to_use = self.run_input.prompt
+            attachments_to_use = []
+
             if self.state.form_data and self.state.form_data.get("current_values"):
-                # Use attachments from form data (already filtered and user-supplied)
+                # Use cleaned prompt and attachments from form data (already filtered and user-supplied)
                 current_values = self.state.form_data.get("current_values", {})
+
+                # Use cleaned prompt from form if available
+                if "prompt" in current_values:
+                    prompt_to_use = current_values["prompt"]
+                    print(f"✅ Using cleaned prompt from form ({len(prompt_to_use)} chars)")
+
                 form_attachments = []
 
-                # Extract attachment arrays from form fields
+                # Extract attachments from form fields (both arrays and single values)
                 for field_name, value in current_values.items():
                     if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
-                        # This looks like an attachment array
+                        # Attachment array
                         form_attachments.extend(value)
+                    elif isinstance(value, str) and value.startswith("http"):
+                        # Single attachment URL
+                        form_attachments.append(value)
 
                 attachments_to_use = form_attachments
                 print(f"📎 Using {len(attachments_to_use)} attachments from form data")
@@ -1491,7 +1503,7 @@ class HITLOrchestrator:
                 attachments_to_use = self._gather_attachments()
 
             payload = self.provider.create_payload(
-                prompt=self.run_input.prompt,
+                prompt=prompt_to_use,
                 attachments=attachments_to_use,
                 operation_type=operation_type,
                 config=self.run_input.agent_tool_config or {},
@@ -1715,16 +1727,29 @@ class HITLOrchestrator:
             print(f"🎯 Passing HITL edits to provider: {hitl_edits}")
 
         # Determine attachments source: form data (if available) or full discovery
+        # Use cleaned prompt and attachments from form if available
+        prompt_to_use = self.run_input.prompt
+        attachments_to_use = []
+
         if self.state.form_data and self.state.form_data.get("current_values"):
-            # Use attachments from form data (already filtered and user-supplied)
+            # Use cleaned prompt and attachments from form data (already filtered and user-supplied)
             current_values = self.state.form_data.get("current_values", {})
+
+            # Use cleaned prompt from form if available
+            if "prompt" in current_values:
+                prompt_to_use = current_values["prompt"]
+                print(f"✅ Using cleaned prompt from form ({len(prompt_to_use)} chars)")
+
             form_attachments = []
 
-            # Extract attachment arrays from form fields
+            # Extract attachments from form fields (both arrays and single values)
             for field_name, value in current_values.items():
                 if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
-                    # This looks like an attachment array
+                    # Attachment array
                     form_attachments.extend(value)
+                elif isinstance(value, str) and value.startswith("http"):
+                    # Single attachment URL
+                    form_attachments.append(value)
 
             attachments_to_use = form_attachments
             print(f"📎 Using {len(attachments_to_use)} attachments from form data for execution")
@@ -1733,7 +1758,7 @@ class HITLOrchestrator:
             attachments_to_use = self._gather_attachments()
 
         payload = self.provider.create_payload(
-            prompt=self.run_input.prompt,
+            prompt=prompt_to_use,
             attachments=attachments_to_use,
             operation_type=self._infer_operation_type(),
             config=self.run_input.agent_tool_config or {},
