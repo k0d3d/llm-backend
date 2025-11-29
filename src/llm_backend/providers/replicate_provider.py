@@ -512,7 +512,7 @@ class ReplicateProvider(AIProvider):
             # Resolve attachment conflicts using AI agent
             if normalized_attachments:
                 agent_input_payload = await self._resolve_attachment_conflicts(
-                    normalized_attachments, agent_input_payload, prompt, list(example_urls)
+                    normalized_attachments, agent_input_payload, clean_prompt, list(example_urls)
                 )
 
             if primary_attachment:
