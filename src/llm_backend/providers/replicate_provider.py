@@ -200,32 +200,56 @@ class ReplicateProvider(AIProvider):
                 normalized.append(url)
         return normalized
 
-    def _strip_attachment_mentions(self, prompt: str, attachments: List[str]) -> str:
-        """Remove attachment URL mentions from prompt text"""
-        if not prompt or not attachments:
-            return prompt
+    def _strip_attachment_mentions(self, prompt: str, attachments: List[str]) -> tuple[str, List[str]]:
+        """Remove attachment markers from prompt and extract embedded URLs
+
+        Returns:
+            tuple: (cleaned_prompt, extracted_urls)
+        """
+        if not prompt:
+            return prompt, list(attachments) if attachments else []
 
         clean_prompt = prompt
+        extracted_urls = list(attachments) if attachments else []
 
-        # First, remove specific attachment URLs
-        for url in attachments:
-            # Remove both the raw URL and any markdown-style links
-            clean_prompt = clean_prompt.replace(url, '')
-            clean_prompt = re.sub(r'\[.*?\]\([^)]*\)', '', clean_prompt)
+        # NEW: Extract URLs from ---BEGIN_ATTACHMENTS--- delimiter block
+        attachment_block = re.search(r'---BEGIN_ATTACHMENTS---(.*?)---END_ATTACHMENTS---', clean_prompt, re.DOTALL)
+        if attachment_block:
+            embedded_urls = [url.strip() for url in attachment_block.group(1).strip().split('\n') if url.strip()]
+            extracted_urls.extend(embedded_urls)
+            clean_prompt = re.sub(r'\n*---BEGIN_ATTACHMENTS---.*?---END_ATTACHMENTS---\n*', '', clean_prompt, re.DOTALL)
+            print(f"📦 Extracted {len(embedded_urls)} URLs from delimiter block: {embedded_urls}")
 
-        # Remove "📎 Attachments:" section and everything after it (common Telegram pattern)
-        # This handles: "\n\n📎 Attachments:\nhttps://..."
+        # LEGACY: Remove "📎 Attachments:" section (Telegram old format)
+        legacy_emoji_match = re.search(r'📎\s*Attachments?:(.*?)(?=\n\n|$)', clean_prompt, re.DOTALL | re.IGNORECASE)
+        if legacy_emoji_match:
+            # Try to extract URLs from legacy format
+            legacy_text = legacy_emoji_match.group(1)
+            legacy_urls = re.findall(r'https?://[^\s]+', legacy_text)
+            if legacy_urls:
+                extracted_urls.extend(legacy_urls)
+                print(f"📎 Extracted {len(legacy_urls)} URLs from legacy emoji format")
         clean_prompt = re.sub(r'\n\n📎\s*Attachments?:.*$', '', clean_prompt, flags=re.IGNORECASE | re.DOTALL)
         clean_prompt = re.sub(r'📎\s*Attachments?:.*$', '', clean_prompt, flags=re.IGNORECASE | re.DOTALL)
 
-        # Strip breadcrumb markers inserted for attachment references
-        clean_prompt = re.sub(r'\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
-        clean_prompt = re.sub(r'\n\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
+        # LEGACY: Strip ":-> attached document:" markers (PWA old format)
+        arrow_matches = re.findall(r':->\\s*attached\\s+document:?\\s*(https?://[^\\s]*)', clean_prompt, re.IGNORECASE)
+        if arrow_matches:
+            extracted_urls.extend(arrow_matches)
+            print(f"📌 Extracted {len(arrow_matches)} URLs from :-> format")
+        clean_prompt = re.sub(r'\s*:->\s*attached\s+document:?\s*', '', clean_prompt, flags=re.IGNORECASE)
+        clean_prompt = re.sub(r'\n\s*:->\s*attached\s+document:?\s*', '', clean_prompt, flags=re.IGNORECASE)
+
+        # Remove specific attachment URLs from the cleaned prompt
+        for url in extracted_urls:
+            clean_prompt = clean_prompt.replace(url, '')
+            # Also remove markdown-style links
+            clean_prompt = re.sub(r'\[.*?\]\([^)]*\)', '', clean_prompt)
 
         # Remove any remaining Telegram API URLs
         clean_prompt = re.sub(r'https?://api\.telegram\.org/[^\s]*', '', clean_prompt)
 
-        # Clean up any ":\s*$" at end of string (orphaned colons)
+        # Clean up orphaned colons
         clean_prompt = re.sub(r':\s*$', '', clean_prompt)
 
         # Clean up artifacts and excessive whitespace
@@ -234,7 +258,10 @@ class ReplicateProvider(AIProvider):
         clean_prompt = re.sub(r' +', ' ', clean_prompt)  # Single spaces only
         clean_prompt = re.sub(r'\n ', '\n', clean_prompt)  # Remove leading spaces after newlines
 
-        return clean_prompt.strip()
+        # Deduplicate extracted URLs
+        extracted_urls = list(dict.fromkeys(extracted_urls))  # Preserve order, remove duplicates
+
+        return clean_prompt.strip(), extracted_urls
 
     async def _resolve_attachment_conflicts(self, user_attachments: List[str], payload: Dict[str, Any], prompt: str, example_urls: List[str]) -> Dict[str, Any]:
         """Use AI agent to resolve conflicts between user attachments and example URLs"""
@@ -345,11 +372,16 @@ class ReplicateProvider(AIProvider):
                 attachments = getattr(self._orchestrator.state, 'attachments', [])
 
             original_prompt = current_values["prompt"]
-            cleaned_prompt = self._strip_attachment_mentions(original_prompt, attachments)
+            cleaned_prompt, extracted_attachments = self._strip_attachment_mentions(original_prompt, attachments)
 
             if cleaned_prompt != original_prompt:
                 print(f"🧹 Cleaned prompt: '{original_prompt[:50]}...' -> '{cleaned_prompt[:50]}...'")
+                print(f"📎 Extracted {len(extracted_attachments)} total attachments")
                 current_values = {**current_values, "prompt": cleaned_prompt}
+
+            # Update attachments list with extracted URLs
+            if extracted_attachments:
+                attachments = extracted_attachments
 
         # NEW: Use deterministic field name mapping
         payload_input = self._map_form_fields_to_api_fields(current_values)
@@ -403,15 +435,25 @@ class ReplicateProvider(AIProvider):
         actual_user_attachments = [url for url in normalized_attachments if url not in example_urls]
         print(f"✅ Actual user attachments (after filtering): {actual_user_attachments}")
 
+        # Extract attachments from prompt and clean it
+        clean_prompt, extracted_attachments = self._strip_attachment_mentions(prompt, normalized_attachments)
+        print(f"🧹 Cleaned prompt: '{clean_prompt}'")
+        if clean_prompt != prompt:
+            print(f"   ✂️ Removed {len(prompt) - len(clean_prompt)} characters from prompt")
+
+        # Update attachments list with extracted URLs
+        if extracted_attachments:
+            normalized_attachments = extracted_attachments
+            print(f"📎 Using {len(extracted_attachments)} extracted attachments")
+
+            # Re-filter to get actual user attachments after extraction
+            actual_user_attachments = [url for url in normalized_attachments if url not in example_urls]
+            print(f"✅ Actual user attachments after extraction: {actual_user_attachments}")
+
         # Use actual user attachment as primary, fallback to first if none found
         primary_attachment = (actual_user_attachments[0] if actual_user_attachments
                             else (normalized_attachments[0] if normalized_attachments else None))
         print(f"🎯 Primary attachment selected: {primary_attachment}")
-
-        clean_prompt = self._strip_attachment_mentions(prompt, normalized_attachments)
-        print(f"🧹 Cleaned prompt: '{clean_prompt}'")
-        if clean_prompt != prompt:
-            print(f"   ✂️ Removed {len(prompt) - len(clean_prompt)} characters from prompt")
 
         example_input_data = deepcopy(self.example_input) if isinstance(self.example_input, dict) else {}
 
