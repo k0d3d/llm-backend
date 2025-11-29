@@ -15,6 +15,7 @@ from .websocket_bridge import WebSocketHITLBridge
 from .validation import HITLValidator, create_hitl_validation_summary
 from .chat_history_client import ChatHistoryClient
 from .hitl_message_client import HITLMessageClient
+from .persistence import HITLStateStore
 from llm_backend.core.providers.base import AIProvider, ProviderResponse, AttributeDict
 from llm_backend.core.types.common import RunInput
 from llm_backend.agents.error_recovery_nl_agent import generate_error_recovery_message
@@ -81,7 +82,66 @@ class HITLOrchestrator:
             self.state.expires_at = datetime.utcnow() + timedelta(seconds=config.timeout_seconds)
 
         self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
-    
+
+    @classmethod
+    async def resume(
+        cls,
+        session_id: str,
+        provider: AIProvider,
+        state_manager: HITLStateStore,
+        websocket_bridge: Optional[WebSocketHITLBridge] = None
+    ) -> Optional['HITLOrchestrator']:
+        """
+        Resume an active HITL run for a session
+
+        Args:
+            session_id: The session ID to resume
+            provider: The AI provider instance
+            state_manager: State manager for loading run state
+            websocket_bridge: Optional WebSocket bridge for notifications
+
+        Returns:
+            HITLOrchestrator instance if an active run exists, None otherwise
+        """
+        print(f"🔁 Attempting to resume HITL run for session {session_id}")
+
+        # Get active run_id for session
+        active_run_id = await state_manager.get_active_run_id(session_id)
+        if not active_run_id:
+            print(f"ℹ️ No active HITL run found for session {session_id}")
+            return None
+
+        print(f"✅ Found active run {active_run_id} for session {session_id}")
+
+        # Load state from database
+        state = await state_manager.load_state(active_run_id)
+        if not state:
+            print(f"⚠️ Failed to load state for run {active_run_id}")
+            return None
+
+        print(f"✅ Loaded state for run {active_run_id}")
+
+        # Reconstruct config and run_input from state
+        config = state.config
+        run_input = RunInput(**state.original_input)
+
+        # Create orchestrator instance
+        orchestrator = cls(provider, config, run_input, state_manager, websocket_bridge)
+
+        # Override with loaded state and run_id
+        orchestrator.state = state
+        orchestrator.run_id = state.run_id
+
+        # Re-link orchestrator to provider
+        if hasattr(provider, 'set_orchestrator'):
+            provider.set_orchestrator(orchestrator)
+
+        print(f"✅ Resumed HITL run {active_run_id} for session {session_id}")
+        print(f"   - Current step: {state.current_step}")
+        print(f"   - Status: {state.status}")
+
+        return orchestrator
+
     def _normalize_run_input(self, run_input):
         """Ensure run_input is a structured object with attribute access."""
         if run_input is None:
@@ -1770,7 +1830,15 @@ class HITLOrchestrator:
     async def _step_completion(self) -> Dict[str, Any]:
         """Completion step"""
         self._transition_to_step(HITLStep.COMPLETED, HITLStatus.COMPLETED)
-        
+
+        # Clear active run for session
+        if self.state_manager and self.session_id:
+            try:
+                await self.state_manager.clear_active_run_id(self.session_id)
+                print(f"✅ Cleared active run for session {self.session_id}")
+            except Exception as e:
+                print(f"⚠️ Failed to clear active run: {e}")
+
         return {
             "run_id": self.run_id,
             "status": "completed",
@@ -2019,7 +2087,15 @@ class HITLOrchestrator:
     async def _handle_error(self, error: Exception) -> Dict[str, Any]:
         self._transition_to_step(self.state.current_step, HITLStatus.FAILED)
         self._add_step_event(self.state.current_step, HITLStatus.FAILED, "system", str(error))
-        
+
+        # Clear active run for session
+        if self.state_manager and self.session_id:
+            try:
+                await self.state_manager.clear_active_run_id(self.session_id)
+                print(f"✅ Cleared active run for session {self.session_id} after error")
+            except Exception as e:
+                print(f"⚠️ Failed to clear active run: {e}")
+
         return {
             "run_id": self.run_id,
             "status": "failed",

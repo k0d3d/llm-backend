@@ -464,5 +464,402 @@ class TestAttachmentHandling:
         print("✅ Attachment requirement detection test passed")
 
 
+class TestSessionToRunTracking:
+    """Test 1-to-1 session-to-run tracking to prevent duplicate HITL runs"""
+
+    @pytest.mark.asyncio
+    async def test_set_and_get_active_run_id(self, database_state_store, hitl_config_with_checkpoints):
+        """Test basic set/get functionality for active run tracking"""
+        session_id = "test-session-active-run"
+        run_id = str(uuid.uuid4())
+
+        # Initially, no active run
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run is None
+
+        # Create a run in the database first (DatabaseStateStore needs actual runs)
+        test_state = HITLState(
+            run_id=run_id,
+            current_step=HITLStep.INFORMATION_REVIEW,
+            status=HITLStatus.QUEUED,  # Active status
+            config=hitl_config_with_checkpoints,
+            original_input={
+                "prompt": "Test",
+                "session_id": session_id,
+                "user_id": "test-user"
+            }
+        )
+        await database_state_store.save_state(test_state)
+
+        # Set active run
+        await database_state_store.set_active_run_id(session_id, run_id)
+
+        # Verify it was set
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run == run_id
+
+        # Change status to completed (simulating completion)
+        test_state.status = HITLStatus.COMPLETED
+        await database_state_store.save_state(test_state)
+
+        # Clear active run (in DatabaseStateStore, this is implicit when status changes)
+        await database_state_store.clear_active_run_id(session_id)
+
+        # Verify it was cleared (get_active_run_id excludes completed runs)
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run is None
+
+        print("✅ Set/get active run ID test passed")
+
+    @pytest.mark.asyncio
+    async def test_one_active_run_per_session(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Verify only one run can be active per session at a time"""
+        provider = MockImageProvider()
+        session_id = "test-session-one-active"
+
+        # Create first orchestrator and run
+        orchestrator1 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+        original_input["user_id"] = "user-test"
+
+        run_id_1 = await orchestrator1.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        # Set as active
+        await database_state_store.set_active_run_id(session_id, run_id_1)
+
+        # Pause first run
+        await database_state_store.pause_run(
+            run_id=run_id_1,
+            checkpoint_type="information_review",
+            context={"message": "First run paused"}
+        )
+
+        # Create second run for same session
+        orchestrator2 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        run_id_2 = await orchestrator2.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        # Set second run as active (should mark first as failed)
+        await database_state_store.set_active_run_id(session_id, run_id_2)
+
+        # Check first run status - should be marked as failed
+        first_run_state = await database_state_store.load_state(run_id_1)
+        assert first_run_state.status == HITLStatus.FAILED
+
+        # Check active run points to second run
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run == run_id_2
+
+        print("✅ One active run per session test passed")
+
+    @pytest.mark.asyncio
+    async def test_clear_active_run_on_completion(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Verify active run is cleared when run completes successfully"""
+        provider = MockImageProvider()
+        session_id = "test-session-clear-on-complete"
+
+        orchestrator = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        # Override session_id
+        orchestrator.session_id = session_id
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+
+        run_id = await orchestrator.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        # Set as active
+        await database_state_store.set_active_run_id(session_id, run_id)
+
+        # Verify it's active
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run == run_id
+
+        # Simulate completion
+        orchestrator.state.final_result = "Background removed successfully"
+        result = await orchestrator._step_completion()
+
+        assert result["status"] == "completed"
+
+        # Save the updated state to database (status is now COMPLETED)
+        await database_state_store.save_state(orchestrator.state)
+
+        # Verify active run was cleared (get_active_run_id excludes completed runs)
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run is None
+
+        print("✅ Clear active run on completion test passed")
+
+    @pytest.mark.asyncio
+    async def test_clear_active_run_on_failure(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Verify active run is cleared when run fails"""
+        provider = MockImageProvider()
+        session_id = "test-session-clear-on-fail"
+
+        orchestrator = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        # Override session_id
+        orchestrator.session_id = session_id
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+
+        run_id = await orchestrator.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        # Set as active
+        await database_state_store.set_active_run_id(session_id, run_id)
+
+        # Verify it's active
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run == run_id
+
+        # Simulate error
+        error = Exception("Test error")
+        result = await orchestrator._handle_error(error)
+
+        assert result["status"] == "failed"
+
+        # Save the updated state to database (status is now FAILED)
+        await database_state_store.save_state(orchestrator.state)
+
+        # Verify active run was cleared (get_active_run_id excludes failed runs)
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run is None
+
+        print("✅ Clear active run on failure test passed")
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_resume_classmethod(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Test HITLOrchestrator.resume() classmethod functionality"""
+        provider = MockImageProvider()
+        session_id = "test-session-resume-classmethod"
+
+        # Create and start initial run
+        orchestrator1 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+        original_input["user_id"] = "user-resume-test"
+
+        run_id = await orchestrator1.start_run(
+            original_input=original_input,
+            user_id="user-resume-test",
+            session_id=session_id
+        )
+
+        # Set as active and pause
+        await database_state_store.set_active_run_id(session_id, run_id)
+        await database_state_store.pause_run(
+            run_id=run_id,
+            checkpoint_type="payload_review",
+            context={"message": "Paused for review"}
+        )
+
+        # Use resume() to load the run
+        resumed_orchestrator = await HITLOrchestrator.resume(
+            session_id=session_id,
+            provider=provider,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        # Verify resumed orchestrator
+        assert resumed_orchestrator is not None
+        assert resumed_orchestrator.run_id == run_id
+        assert resumed_orchestrator.session_id == session_id
+        assert resumed_orchestrator.state.status == HITLStatus.AWAITING_HUMAN
+        assert resumed_orchestrator.state.checkpoint_context["type"] == "payload_review"
+
+        print("✅ Orchestrator resume classmethod test passed")
+
+    @pytest.mark.asyncio
+    async def test_resume_nonexistent_session(self, database_state_store, mock_websocket_bridge):
+        """Verify resume() returns None for sessions without active runs"""
+        provider = MockImageProvider()
+        session_id = "nonexistent-session"
+
+        # Try to resume non-existent session
+        resumed_orchestrator = await HITLOrchestrator.resume(
+            session_id=session_id,
+            provider=provider,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        assert resumed_orchestrator is None
+
+        print("✅ Resume nonexistent session test passed")
+
+    @pytest.mark.asyncio
+    async def test_multiple_requests_same_session(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Simulate the duplicate aspect_ratio bug scenario"""
+        provider = MockImageProvider()
+        session_id = "test-session-duplicate-prevention"
+
+        # First request - creates run and pauses
+        orchestrator1 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+        original_input["user_id"] = "user-dup-test"
+
+        run_id_1 = await orchestrator1.start_run(
+            original_input=original_input,
+            user_id="user-dup-test",
+            session_id=session_id
+        )
+
+        # Set as active and pause (simulating validation pause)
+        await database_state_store.set_active_run_id(session_id, run_id_1)
+        await database_state_store.pause_run(
+            run_id=run_id_1,
+            checkpoint_type="information_review",
+            context={
+                "validation_issues": [
+                    {"field": "aspect_ratio", "issue": "Missing required parameter"}
+                ]
+            }
+        )
+
+        # Second request (user sends same prompt again without answering)
+        # Should resume existing run instead of creating new one
+        resumed_orchestrator = await HITLOrchestrator.resume(
+            session_id=session_id,
+            provider=provider,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        # Verify we got the same run back
+        assert resumed_orchestrator is not None
+        assert resumed_orchestrator.run_id == run_id_1
+        # Check validation issues in context (stored by pause_run)
+        context_validation_issues = resumed_orchestrator.state.checkpoint_context.get("context", {}).get("validation_issues", [])
+        assert len(context_validation_issues) > 0
+        assert context_validation_issues[0]["field"] == "aspect_ratio"
+
+        # Verify no duplicate run was created
+        active_runs = await database_state_store.list_active_runs(session_id=session_id)
+        assert len(active_runs) == 1
+        assert active_runs[0]["run_id"] == run_id_1
+
+        print("✅ Multiple requests same session test passed")
+
+    @pytest.mark.asyncio
+    async def test_old_active_runs_marked_failed(self, database_state_store, mock_websocket_bridge, sample_run_input, hitl_config_with_checkpoints):
+        """Verify DatabaseStateStore marks old runs as failed when setting new active run"""
+        provider = MockImageProvider()
+        session_id = "test-session-mark-old-failed"
+
+        # Create and activate first run
+        orchestrator1 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        original_input = sample_run_input.model_dump()
+        original_input["session_id"] = session_id
+
+        run_id_1 = await orchestrator1.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        await database_state_store.set_active_run_id(session_id, run_id_1)
+
+        # Pause first run
+        await database_state_store.pause_run(
+            run_id=run_id_1,
+            checkpoint_type="payload_review",
+            context={}
+        )
+
+        # Create second run
+        orchestrator2 = HITLOrchestrator(
+            provider=provider,
+            config=hitl_config_with_checkpoints,
+            run_input=sample_run_input,
+            state_manager=database_state_store,
+            websocket_bridge=mock_websocket_bridge
+        )
+
+        run_id_2 = await orchestrator2.start_run(
+            original_input=original_input,
+            user_id="user-test",
+            session_id=session_id
+        )
+
+        # Activate second run - should fail first run
+        await database_state_store.set_active_run_id(session_id, run_id_2)
+
+        # Load first run and verify it was marked as failed
+        first_run_state = await database_state_store.load_state(run_id_1)
+        assert first_run_state.status == HITLStatus.FAILED
+
+        # Verify second run is now active
+        active_run = await database_state_store.get_active_run_id(session_id)
+        assert active_run == run_id_2
+
+        print("✅ Old active runs marked failed test passed")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

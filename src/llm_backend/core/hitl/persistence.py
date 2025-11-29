@@ -232,6 +232,21 @@ class HITLStateStore(ABC):
     async def cleanup_expired_approvals(self) -> int:
         pass
 
+    @abstractmethod
+    async def get_active_run_id(self, session_id: str) -> Optional[str]:
+        """Get the active run_id for a session"""
+        pass
+
+    @abstractmethod
+    async def set_active_run_id(self, session_id: str, run_id: str) -> None:
+        """Set the active run_id for a session"""
+        pass
+
+    @abstractmethod
+    async def clear_active_run_id(self, session_id: str) -> None:
+        """Clear the active run_id for a session"""
+        pass
+
 
 class RedisStateStore(HITLStateStore):
     """Redis-based state store for fast access"""
@@ -311,6 +326,21 @@ class RedisStateStore(HITLStateStore):
     async def cleanup_expired_approvals(self) -> int:
         """Redis handles expiration automatically"""
         return 0  # Redis TTL handles cleanup
+
+    async def get_active_run_id(self, session_id: str) -> Optional[str]:
+        """Get the active run_id for a session"""
+        key = f"session:{session_id}:active_run"
+        return await self.redis.get(key)
+
+    async def set_active_run_id(self, session_id: str, run_id: str) -> None:
+        """Set the active run_id for a session"""
+        key = f"session:{session_id}:active_run"
+        await self.redis.setex(key, self.ttl, run_id)
+
+    async def clear_active_run_id(self, session_id: str) -> None:
+        """Clear the active run_id for a session"""
+        key = f"session:{session_id}:active_run"
+        await self.redis.delete(key)
 
 
 class DatabaseStateStore(HITLStateStore):
@@ -831,28 +861,80 @@ class DatabaseStateStore(HITLStateStore):
             # Count runs by status using JSONB
             status_counts = session.execute("""
                 SELECT state_snapshot->>'status' as status, COUNT(*) as count
-                FROM hitl_runs 
+                FROM hitl_runs
                 WHERE state_snapshot IS NOT NULL
                 GROUP BY state_snapshot->>'status'
             """).fetchall()
-            
+
             # Average execution times by checkpoint type
             checkpoint_times = session.execute("""
-                SELECT 
+                SELECT
                     state_snapshot->'checkpoint_context'->>'type' as checkpoint_type,
                     AVG((state_snapshot->>'total_execution_time_ms')::int) as avg_time
-                FROM hitl_runs 
-                WHERE state_snapshot IS NOT NULL 
+                FROM hitl_runs
+                WHERE state_snapshot IS NOT NULL
                     AND state_snapshot->'checkpoint_context'->>'type' IS NOT NULL
                 GROUP BY state_snapshot->'checkpoint_context'->>'type'
             """).fetchall()
-            
+
             return {
                 "status_distribution": {row[0]: row[1] for row in status_counts},
                 "avg_execution_time_by_checkpoint": {row[0]: row[1] for row in checkpoint_times}
             }
         finally:
             session.close()
+
+    async def get_active_run_id(self, session_id: str) -> Optional[str]:
+        """Get the active run_id for a session"""
+        session = self.SessionLocal()
+        try:
+            # Query for the most recent active run for this session
+            run = session.query(HITLRun).filter(
+                HITLRun.session_id == session_id,
+                HITLRun.status.in_(["queued", "running", "awaiting_human", "paused"])
+            ).order_by(HITLRun.updated_at.desc()).first()
+
+            return str(run.run_id) if run else None
+        finally:
+            session.close()
+
+    async def set_active_run_id(self, session_id: str, run_id: str) -> None:
+        """Set the active run_id for a session"""
+        # For database store, we ensure the specified run is in an active state
+        # and mark any other active runs for this session as failed
+        session = self.SessionLocal()
+        try:
+            run_uuid = _uuid_value(run_id)
+
+            # Mark any existing active runs for this session (except this one) as failed
+            session.query(HITLRun).filter(
+                HITLRun.session_id == session_id,
+                HITLRun.run_id != run_uuid,
+                HITLRun.status.in_(["queued", "running", "awaiting_human", "paused"])
+            ).update({"status": "failed", "updated_at": datetime.utcnow()})
+
+            # Ensure the specified run is in an active state (if it exists)
+            target_run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).first()
+            if target_run and target_run.status in ["completed", "failed", "cancelled"]:
+                # If run is already terminated, set it back to queued
+                target_run.status = "queued"
+                target_run.updated_at = datetime.utcnow()
+
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    async def clear_active_run_id(self, session_id: str) -> None:
+        """Clear the active run_id for a session"""
+        # For database store, mark all active runs for this session as completed/failed
+        # (This is called when a run completes or fails, so we don't change status)
+        # The clearing is implicit - when a run completes, its status changes and
+        # it will no longer be returned by get_active_run_id()
+        # This method is a no-op for database store
+        pass
 
 
 def create_state_manager(database_url: str) -> HITLStateStore:
@@ -1001,3 +1083,15 @@ class HybridStateManager:
         await self.save_state(state)
 
         return state
+
+    async def get_active_run_id(self, session_id: str) -> Optional[str]:
+        """Get the active run_id for a session"""
+        return await self.db_store.get_active_run_id(session_id)
+
+    async def set_active_run_id(self, session_id: str, run_id: str) -> None:
+        """Set the active run_id for a session"""
+        await self.db_store.set_active_run_id(session_id, run_id)
+
+    async def clear_active_run_id(self, session_id: str) -> None:
+        """Clear the active run_id for a session"""
+        await self.db_store.clear_active_run_id(session_id)
