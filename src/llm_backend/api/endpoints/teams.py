@@ -115,12 +115,15 @@ async def run_replicate_team(
             use_natural_language_hitl=True  # Enable NL conversation mode
         )
 
+        # Extract session_id from run_input (not query param which may be None)
+        run_session_id = run_input.session_id
+
         # Check for active run and resume if exists
         orchestrator = None
-        if session_id and state_manager:
-            print(f"🔍 Checking for active HITL run for session {session_id}")
+        if run_session_id and state_manager:
+            print(f"🔍 Checking for active HITL run for session {run_session_id}")
             orchestrator = await HITLOrchestrator.resume(
-                session_id=session_id,
+                session_id=run_session_id,
                 provider=provider,
                 state_manager=state_manager,
                 websocket_bridge=websocket_bridge
@@ -129,10 +132,10 @@ async def run_replicate_team(
         if orchestrator:
             # Resumed existing run
             run_id = orchestrator.run_id
-            print(f"✅ Resumed existing HITL run {run_id} for session {session_id}")
+            print(f"✅ Resumed existing HITL run {run_id} for session {run_session_id}")
         else:
             # Create new orchestrator
-            print(f"🆕 Creating new HITL run for session {session_id}")
+            print(f"🆕 Creating new HITL run for session {run_session_id}")
             orchestrator = HITLOrchestrator(
                 provider=provider,
                 config=hitl_config,
@@ -145,13 +148,13 @@ async def run_replicate_team(
             run_id = await orchestrator.start_run(
                 original_input=run_input.dict(),
                 user_id=run_input.user_id,
-                session_id=run_input.session_id
+                session_id=run_session_id
             )
 
             # Set as active run for session
-            if state_manager and session_id:
-                await state_manager.set_active_run_id(session_id, run_id)
-                print(f"✅ Set run {run_id} as active for session {session_id}")
+            if state_manager and run_session_id:
+                await state_manager.set_active_run_id(run_session_id, run_id)
+                print(f"✅ Set run {run_id} as active for session {run_session_id}")
 
         # Queue job instead of background task
         logger.info("Queuing HITL orchestrator job for run_id=%s", run_id)

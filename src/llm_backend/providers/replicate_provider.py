@@ -370,7 +370,7 @@ class ReplicateProvider(AIProvider):
         )
 
     async def create_payload(self, prompt: str, attachments: List[str], operation_type: OperationType, config: Dict, conversation: Optional[List[Dict[str, str]]] = None, hitl_edits: Dict = None) -> ReplicatePayload:
-        """Create Replicate-specific payload - uses deterministic mapping for forms, agent for text prompts"""
+        """Create Replicate-specific payload using intelligent Pydantic AI agent"""
         from llm_backend.agents.replicate_team import ReplicateTeam
         from llm_backend.core.types.replicate import ExampleInput
         import asyncio
@@ -378,14 +378,7 @@ class ReplicateProvider(AIProvider):
         if self.run_input is None:
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
-        # Check if we have structured form data from HITL orchestrator
-        if hasattr(self, '_orchestrator') and self._orchestrator and hasattr(self._orchestrator.state, 'form_data'):
-            form_data = self._orchestrator.state.form_data
-            if form_data and form_data.get("current_values"):
-                print(f"📋 Form data detected - using deterministic field mapping (bypassing agent)")
-                return await self._create_payload_from_form(form_data, operation_type, config)
-
-        print("🤖 No form data - using intelligent Pydantic AI agent for payload creation")
+        print("🤖 Using intelligent Pydantic AI agent for payload creation")
 
         normalized_attachments = self._normalize_attachments(attachments or [])
         
