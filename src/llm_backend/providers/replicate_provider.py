@@ -206,27 +206,33 @@ class ReplicateProvider(AIProvider):
             return prompt
 
         clean_prompt = prompt
+
+        # First, remove specific attachment URLs
         for url in attachments:
             # Remove both the raw URL and any markdown-style links
             clean_prompt = clean_prompt.replace(url, '')
             clean_prompt = re.sub(r'\[.*?\]\([^)]*\)', '', clean_prompt)
-            # Clean up any double spaces from removals
-            clean_prompt = re.sub(r'\s+', ' ', clean_prompt)
+
+        # Remove "📎 Attachments:" section and everything after it (common Telegram pattern)
+        # This handles: "\n\n📎 Attachments:\nhttps://..."
+        clean_prompt = re.sub(r'\n\n📎\s*Attachments?:.*$', '', clean_prompt, flags=re.IGNORECASE | re.DOTALL)
+        clean_prompt = re.sub(r'📎\s*Attachments?:.*$', '', clean_prompt, flags=re.IGNORECASE | re.DOTALL)
 
         # Strip breadcrumb markers inserted for attachment references
-        # Pattern breakdown: \s* (optional whitespace) :-> (literal) \s* (optional whitespace)
-        # attached (word) \s* (optional whitespace) document (word) :? (optional colon)
         clean_prompt = re.sub(r'\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
-
-        # Also handle newline variations
         clean_prompt = re.sub(r'\n\s*:->\s*attached\s+document:?', '', clean_prompt, flags=re.IGNORECASE)
+
+        # Remove any remaining Telegram API URLs
+        clean_prompt = re.sub(r'https?://api\.telegram\.org/[^\s]*', '', clean_prompt)
 
         # Clean up any ":\s*$" at end of string (orphaned colons)
         clean_prompt = re.sub(r':\s*$', '', clean_prompt)
 
-        # Clean up artifacts
+        # Clean up artifacts and excessive whitespace
         clean_prompt = re.sub(r'""', '"', clean_prompt)
-        clean_prompt = re.sub(r'\s+', ' ', clean_prompt)  # Collapse multiple spaces
+        clean_prompt = re.sub(r'\n\s*\n\s*\n+', '\n\n', clean_prompt)  # Max 2 newlines
+        clean_prompt = re.sub(r' +', ' ', clean_prompt)  # Single spaces only
+        clean_prompt = re.sub(r'\n ', '\n', clean_prompt)  # Remove leading spaces after newlines
 
         return clean_prompt.strip()
 
@@ -379,28 +385,38 @@ class ReplicateProvider(AIProvider):
             raise ValueError("ReplicateProvider requires run_input to be set before creating payloads")
 
         print("🤖 Using intelligent Pydantic AI agent for payload creation")
+        print(f"📥 Raw attachments received: {attachments}")
+        print(f"📝 Original prompt: '{prompt[:100]}...'")
 
         normalized_attachments = self._normalize_attachments(attachments or [])
-        
+        print(f"🔄 Normalized attachments: {normalized_attachments}")
+
         # Extract example URLs to filter them out from user attachments
         example_urls = set()
         if isinstance(self.example_input, dict):
             for value in self.example_input.values():
                 if isinstance(value, str) and value.startswith("http"):
                     example_urls.add(value)
-        
+        print(f"📋 Example URLs from schema: {example_urls}")
+
         # Filter out example URLs to get actual user attachments
         actual_user_attachments = [url for url in normalized_attachments if url not in example_urls]
-        
+        print(f"✅ Actual user attachments (after filtering): {actual_user_attachments}")
+
         # Use actual user attachment as primary, fallback to first if none found
-        primary_attachment = (actual_user_attachments[0] if actual_user_attachments 
+        primary_attachment = (actual_user_attachments[0] if actual_user_attachments
                             else (normalized_attachments[0] if normalized_attachments else None))
-        
+        print(f"🎯 Primary attachment selected: {primary_attachment}")
+
         clean_prompt = self._strip_attachment_mentions(prompt, normalized_attachments)
+        print(f"🧹 Cleaned prompt: '{clean_prompt}'")
+        if clean_prompt != prompt:
+            print(f"   ✂️ Removed {len(prompt) - len(clean_prompt)} characters from prompt")
 
         example_input_data = deepcopy(self.example_input) if isinstance(self.example_input, dict) else {}
 
         if primary_attachment:
+            print(f"🔧 Attempting to assign primary_attachment to example_input_data...")
             image_fields = [
                 "input_image",
                 "image",
@@ -412,12 +428,17 @@ class ReplicateProvider(AIProvider):
             assigned = False
             for field in image_fields:
                 if field in example_input_data:
+                    old_value = example_input_data[field]
                     example_input_data[field] = primary_attachment
                     assigned = True
+                    print(f"   ✅ Assigned '{field}': {old_value} -> {primary_attachment}")
                     break
 
             if not assigned:
                 example_input_data.setdefault("input_image", primary_attachment)
+                print(f"   ⚠️ No existing image field found, created 'input_image': {primary_attachment}")
+        else:
+            print(f"⚠️ No primary_attachment to assign")
 
         replicate_team = ReplicateTeam(
             prompt=clean_prompt,
