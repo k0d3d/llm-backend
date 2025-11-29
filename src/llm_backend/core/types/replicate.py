@@ -38,7 +38,7 @@ class ExampleInput(BaseModel):
     schema_metadata: Optional[Dict[str, Any]] = None  # Example input schema hints
     hitl_field_metadata: Optional[Dict[str, Any]] = None  # Alias/collection hints for edits
     structured_form_values: Optional[Dict[str, Any]] = None  # NEW: Structured values from form-based HITL
-    conversation: Optional[List[Dict[str, str]]] = None  # Chat history for context
+    conversation: Optional[List[Dict[str, Any]]] = None  # Chat history for context (allows dict props)
 
 
 class AttachmentDiscoveryContext(BaseModel):

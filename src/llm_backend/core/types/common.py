@@ -2,7 +2,7 @@
 
 from enum import Enum
 from pydantic import BaseModel
-from typing import Optional, Union, List, Dict
+from typing import Any, Optional, Union, List, Dict
 
 class RunInput(BaseModel):
     prompt: str
@@ -14,7 +14,7 @@ class RunInput(BaseModel):
     log_id: Optional[str] = None
     agent_tool_config: Optional[dict]
     selected_llm: Optional[dict] = None
-    conversation: Optional[List[Dict[str, str]]] = None
+    conversation: Optional[List[Dict[str, Any]]] = None
 
 
 class OperationType(str, Enum):
