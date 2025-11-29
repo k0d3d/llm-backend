@@ -430,18 +430,31 @@ class ReplicateTeam:
 
     def response_audit_agent(self) -> Agent:
         """Agent that audits and formats the Replicate API response."""
-        
+
         agent = Agent(
             "openai:gpt-4.1-mini",
             system_prompt=(
                 """
-                You are a Response Audit Agent. Review the Replicate API response and format it
-                for the end user. Extract relevant output URLs, status information, and any errors.
-                Provide a clean, user-friendly summary of the results.
+                You are a Response Audit Agent. Extract the output URLs from the Replicate API response.
+
+                CRITICAL RULES:
+                - DO NOT repeat or echo the user's original request/prompt
+                - DO NOT add context or descriptions of what was requested
+                - ONLY return the output image/video/audio URLs from the API response
+                - Format: Return just the URL(s), one per line
+                - If there are errors, briefly state the error without repeating the user's request
+
+                Example of CORRECT output:
+                https://replicate.delivery/xezq/abc123/output.jpeg
+
+                Example of INCORRECT output (DO NOT DO THIS):
+                "star wars inspired poster https://replicate.delivery/xezq/abc123/output.jpeg"
+
+                Keep responses minimal and direct. Only the URL(s), nothing else.
                 """
             ),
         )
-        
+
         return agent
 
     def final_guard_agent(self) -> Agent:
@@ -675,11 +688,25 @@ class ReplicateTeam:
             deps=api_result.output,
         )
 
+        # Strip echoed prompt if present (LLMs sometimes ignore system instructions)
+        cleaned_output = response_audit_result.output
+        if isinstance(cleaned_output, str) and isinstance(self.prompt, str):
+            prompt_trimmed = self.prompt.strip()
+            output_trimmed = cleaned_output.strip()
+
+            # Check if response starts with the user's prompt
+            if output_trimmed.startswith(prompt_trimmed):
+                # Remove the echoed prompt from the beginning
+                cleaned_output = output_trimmed[len(prompt_trimmed):].strip()
+                print(f"🧹 Stripped echoed prompt from response (removed {len(prompt_trimmed)} chars)")
+                print(f"   Original prompt: {prompt_trimmed[:50]}...")
+                print(f"   Cleaned output length: {len(cleaned_output)}")
+
         await send_data_to_url_async(
-            data=response_audit_result.output,
+            data=cleaned_output,
             url=f"{CORE_API_URL}/from-llm",
             crew_input=self.run_input,
             message_type=MessageType["REPLICATE_PREDICTION"],
         )
 
-        return response_audit_result.output
+        return cleaned_output
