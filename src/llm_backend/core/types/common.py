@@ -26,6 +26,9 @@ class OperationType(str, Enum):
     AUDIO_GENERATION = "audio_generation"
     EMBEDDING = "embedding"
     CLASSIFICATION = "classification"
+    DATABASE_QUERY = "database_query"
+    DATABASE_WRITE = "database_write"
+    DATABASE_SCHEMA = "database_schema"
 
 
 class AgentTools(str, Enum):
@@ -33,6 +36,7 @@ class AgentTools(str, Enum):
     WEB3TOOL = "web3-agent-tool"
     WOOTOOL = "woo-agent-tool"
     REPLICATETOOL = "replicate-agent-tool"
+    CLIENT_DATABASE = "client-database-tool"
 
 
 MessageType = {

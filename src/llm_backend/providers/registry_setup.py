@@ -4,19 +4,27 @@ Registry setup and provider registration
 
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.providers.replicate_provider import ReplicateProvider
+from llm_backend.providers.database_provider import DatabaseProvider
 from llm_backend.core.types.common import AgentTools
 
 
 def register_providers():
     """Register all available providers with the registry"""
-    
+
     # Register Replicate provider
     ProviderRegistry.register(
         name="replicate",
         provider_class=ReplicateProvider,
         tool_enum=AgentTools.REPLICATETOOL
     )
-    
+
+    # Register Database provider
+    ProviderRegistry.register(
+        name="database",
+        provider_class=DatabaseProvider,
+        tool_enum=AgentTools.CLIENT_DATABASE
+    )
+
     # Future providers can be registered here:
     # ProviderRegistry.register("openai", OpenAIProvider, AgentTools.OPENAITOOL)
     # ProviderRegistry.register("anthropic", AnthropicProvider, AgentTools.ANTHROPICTOOL)
