@@ -146,7 +146,8 @@ async def resolve_attachment_conflicts(
             user_attachments,
             current_payload,
             replaceable_fields,
-            example_urls=example_urls
+            example_urls=example_urls,
+            example_input=example_input,
         )
 
         return AttachmentResolutionOutput(
@@ -223,6 +224,7 @@ def _manual_attachment_resolution(
     payload: Dict[str, Any],
     replaceable_fields: List[str],
     example_urls: List[str],
+    example_input: Optional[Dict[str, Any]] = None,
 ) -> tuple[Dict[str, Any], List[str]]:
     """Fallback manual replacement logic when agent execution fails"""
     if not user_attachments:
@@ -230,7 +232,8 @@ def _manual_attachment_resolution(
 
     resolved = payload.copy()
     changes: List[str] = []
-    
+    example_input = example_input or {}
+
     # Filter out example URLs and known placeholder domains
     placeholder_domains = [
         "example.com",
@@ -239,13 +242,13 @@ def _manual_attachment_resolution(
         "sample.com",
         "test.com",
     ]
-    
+
     # Filter attachments by both example URLs and placeholder domains
     actual_user_attachments = [
         url for url in user_attachments
         if url not in example_urls and not any(domain in url for domain in placeholder_domains)
     ]
-    
+
     # Use actual user attachment if available, otherwise fall back to first non-example URL
     primary_attachment = None
     if actual_user_attachments:
@@ -260,6 +263,9 @@ def _manual_attachment_resolution(
         if not primary_attachment and user_attachments:
             primary_attachment = user_attachments[0]
 
+    if not primary_attachment:
+        return resolved, changes
+
     # Map generic field names to actual schema fields
     field_aliases = {
         "image": ["input_image", "image", "source_image", "image_url"],
@@ -268,15 +274,17 @@ def _manual_attachment_resolution(
         "file": ["input_file", "file", "input"],
         "document": ["document", "input_document", "file"]
     }
-    
+
     # Expand replaceable_fields to include actual schema fields
     expanded_fields = set(replaceable_fields)
     for field in replaceable_fields:
         if field in field_aliases:
             expanded_fields.update(field_aliases[field])
-    
-    # Try to replace fields in order of preference
+
+    # Try to replace fields in order of preference (only fields that exist in schema)
     for field in expanded_fields:
+        if example_input and field not in example_input:
+            continue  # Skip fields not in schema
         value = resolved.get(field)
 
         if value is None:
@@ -296,10 +304,38 @@ def _manual_attachment_resolution(
                 resolved[field] = primary_attachment
                 changes.append(f"{field}: {value} -> {primary_attachment}")
                 break
-        
-        # If still no changes, add to most common field
+
+        # If still no changes, find a valid schema field to add to
+        if not changes and example_input:
+            attachment_fields = ["input_image", "image", "image_input", "source_image", "image_url"]
+            # First: try common attachment fields that exist in schema
+            for field in attachment_fields:
+                if field in example_input:
+                    resolved[field] = primary_attachment
+                    changes.append(f"{field}: <added from schema> -> {primary_attachment}")
+                    break
+
+            # Second: look for any field with URL value in schema
+            if not changes:
+                for field, value in example_input.items():
+                    if isinstance(value, str) and value.startswith("http"):
+                        resolved[field] = primary_attachment
+                        changes.append(f"{field}: <added from URL field> -> {primary_attachment}")
+                        break
+
+            # Third: look for any attachment-like field name in schema
+            if not changes:
+                attachment_indicators = ["image", "img", "photo", "file", "input", "source", "media"]
+                for field in example_input.keys():
+                    if any(ind in field.lower() for ind in attachment_indicators):
+                        resolved[field] = primary_attachment
+                        changes.append(f"{field}: <added from heuristic> -> {primary_attachment}")
+                        break
+
+        # If still no changes and no schema, use default field
         if not changes:
             resolved["input_image"] = primary_attachment
-            changes.append(f"input_image: <added> -> {primary_attachment}")
+            changes.append(f"input_image: <fallback added> -> {primary_attachment}")
+            print(f"⚠️ Added attachment to default field 'input_image' - may be filtered if not in schema")
 
     return resolved, changes

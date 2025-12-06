@@ -290,15 +290,54 @@ class ReplicateProvider(AIProvider):
         """Manual fallback for attachment resolution"""
         if not user_attachments:
             return payload
-            
+
         resolved = payload.copy()
         primary_attachment = user_attachments[0]
-        
+
         # Replace any example URLs with user's primary attachment
+        replaced = False
         for key, value in resolved.items():
             if isinstance(value, str) and "replicate.delivery" in value:
                 resolved[key] = primary_attachment
                 print(f"🔧 Manual replacement: {key} -> {primary_attachment}")
+                replaced = True
+
+        # If no field was replaced, ADD the attachment to a schema field
+        if not replaced and primary_attachment:
+            attachment_fields = ["input_image", "image", "image_input", "source_image", "image_url"]
+            example_input = getattr(self, 'example_input', {}) or {}
+
+            # First try to find a common attachment field that exists in the schema
+            for field in attachment_fields:
+                if field in example_input:
+                    resolved[field] = primary_attachment
+                    print(f"🔧 Manual addition (schema match): {field} = {primary_attachment}")
+                    replaced = True
+                    break
+
+            # Second: look for ANY field in schema that looks like an attachment field
+            if not replaced:
+                attachment_indicators = ["image", "img", "photo", "picture", "file", "input", "source", "media"]
+                for field, value in example_input.items():
+                    field_lower = field.lower()
+                    if any(ind in field_lower for ind in attachment_indicators):
+                        resolved[field] = primary_attachment
+                        print(f"🔧 Manual addition (schema heuristic): {field} = {primary_attachment}")
+                        replaced = True
+                        break
+
+            # Third: look for any field that has a URL value in schema (likely an attachment)
+            if not replaced:
+                for field, value in example_input.items():
+                    if isinstance(value, str) and value.startswith("http"):
+                        resolved[field] = primary_attachment
+                        print(f"🔧 Manual addition (URL field): {field} = {primary_attachment}")
+                        replaced = True
+                        break
+
+            # Last resort: if we still couldn't find a match, log warning
+            if not replaced:
+                print(f"⚠️ Manual fallback: Could not find attachment field in schema. Schema fields: {list(example_input.keys())}")
 
         return resolved
 
@@ -557,6 +596,7 @@ class ReplicateProvider(AIProvider):
                     normalized_attachments, agent_input_payload, clean_prompt, list(example_urls)
                 )
 
+            # Final safety net: ensure attachment is added if still missing
             if primary_attachment:
                 attachment_fields = [
                     "input_image",
@@ -566,7 +606,25 @@ class ReplicateProvider(AIProvider):
                     "image_url",
                 ]
                 if not any(agent_input_payload.get(field) for field in attachment_fields):
-                    agent_input_payload[attachment_fields[0]] = primary_attachment
+                    # Find an attachment field that exists in the schema
+                    example_input = self.example_input or {}
+                    added = False
+                    for field in attachment_fields:
+                        if field in example_input:
+                            agent_input_payload[field] = primary_attachment
+                            print(f"🔧 Safety net: added {field} = {primary_attachment}")
+                            added = True
+                            break
+                    # Fallback: look for any field with URL value in schema
+                    if not added:
+                        for field, value in example_input.items():
+                            if isinstance(value, str) and value.startswith("http"):
+                                agent_input_payload[field] = primary_attachment
+                                print(f"🔧 Safety net (URL match): added {field} = {primary_attachment}")
+                                added = True
+                                break
+                    if not added:
+                        print(f"⚠️ Safety net: could not find schema field for attachment")
 
             agent_input_payload = self._filter_payload_to_schema(agent_input_payload)
 
