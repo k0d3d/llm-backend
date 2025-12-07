@@ -107,6 +107,13 @@ The orchestrator uses specialized AI agents for intelligent form handling:
   - Field name analysis (suggests file input types)
   - Used by AttachmentResolver for conflict resolution
 
+- **Schema-Aware Attachment Fallback**: When AI agents fail or produce incomplete payloads, a cascade of fallbacks ensures user attachments are mapped:
+  1. Replace existing placeholder URLs (e.g., `replicate.delivery` domains)
+  2. Check if common fields (`input_image`, `image`, etc.) exist in `example_input` schema
+  3. Find any schema field with attachment-like name (`image`, `photo`, `file`, `source`, `media`)
+  4. Find any schema field containing a URL value (likely an attachment placeholder)
+  - Critical: Only adds fields that exist in the model's schema to prevent filtering by `_filter_payload_to_schema()`
+
 ## Data Flow
 
 ### Synchronous Flow (Auto Mode)

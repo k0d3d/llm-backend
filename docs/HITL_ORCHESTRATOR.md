@@ -9,6 +9,7 @@ The orchestrator acts as a state machine that coordinates between AI providers a
 Note on attachments:
 - The orchestrator no longer reads a single `document_url` field from `RunInput`. Instead, `_gather_attachments()` inspects recent chat history (and other configured sources) for the current `session_id`/`user_id` to assemble a list of candidate assets.
 - If a provider/model requires an attachment and none can be discovered, validation checkpoints surface the missing asset as a blocking issue, pausing the run until the human reviewer uploads or maps the necessary file.
+- **Attachment Resolution Fallback**: When AI agents fail or produce incomplete payloads, a schema-aware fallback ensures user attachments are mapped to the correct field by checking the model's `example_input` schema. This prevents attachments from being silently dropped when fields are filtered by `_filter_payload_to_schema()`.
 
 ### Auto-Approve Behaviour
 

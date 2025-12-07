@@ -27,6 +27,7 @@
 ## Known Gaps / Next Steps
 
 1. **Attachment replay** – `_attachments_from_chat_history()` is a stub; implement retrieval of uploaded assets (e.g., via session-based message store) so resumed runs use real files instead of example inputs.
+   - ✅ **Partially addressed**: Schema-aware attachment fallback now ensures user attachments are mapped to correct fields even when AI agents fail. See `docs/FORM_BASED_HITL.md` for details.
 2. **Observability** – Surface `checkpoint_context`, `pending_actions`, and approval metadata in session-status APIs and structure logs for pause/resume events.
 3. **Frontend UX** – Ensure the client re-fetches active HITL runs after reconnect and resubmits any required edits or files alongside approval responses.
 4. **Testing** – Add integration tests around pause/resume cycles and database persistence (e.g., `tests/test_hitl_session_resumability.py`).

@@ -62,6 +62,43 @@ field_classifications = {
 }
 ```
 
+### 2b. Schema-Aware Attachment Fallback
+
+**File:** `src/llm_backend/providers/replicate_provider.py` and `src/llm_backend/agents/attachment_resolver.py`
+
+When AI agents fail (e.g., "Exceeded maximum retries") or produce payloads missing attachment fields, a schema-aware fallback cascade ensures user attachments are still mapped correctly:
+
+**Fallback Cascade:**
+1. **Replace existing placeholders**: If payload has fields with `replicate.delivery` URLs, replace with user attachment
+2. **Schema field matching**: Check if common fields (`input_image`, `image`, `image_input`, etc.) exist in `example_input`
+3. **Heuristic field detection**: Find any schema field with attachment-like name (`image`, `photo`, `file`, `source`, `media`)
+4. **URL value detection**: Find any schema field containing a URL value (likely an attachment placeholder)
+5. **Warning**: Log if no suitable field found, preventing silent failures
+
+**Critical Design Decision:**
+- Fields are only added if they exist in the model's `example_input` schema
+- This prevents `_filter_payload_to_schema()` from removing the attachment field
+- Avoids hardcoded field names that may not exist in a specific model's schema
+
+**Example Fallback Flow:**
+```python
+# User provides image, but AI agent outputs:
+{'prompt': 'change the room'}  # Missing image_input!
+
+# Fallback checks example_input schema:
+example_input = {'image_input': 'https://replicate.delivery/...', 'prompt': '...'}
+
+# Finds 'image_input' in schema → adds user attachment:
+{'prompt': 'change the room', 'image_input': 'https://user-photo.jpg'}
+```
+
+**Log Messages:**
+- `🔧 Manual replacement: {field} -> {url}` - Replaced placeholder
+- `🔧 Manual addition (schema match): {field} = {url}` - Added to known field
+- `🔧 Manual addition (schema heuristic): {field} = {url}` - Added via heuristic
+- `🔧 Manual addition (URL field): {field} = {url}` - Added to URL-value field
+- `⚠️ Manual fallback: Could not find attachment field in schema` - No field found
+
 ### 3. New HITL Step: FORM_INITIALIZATION
 
 **File:** `src/llm_backend/core/hitl/types.py`

@@ -53,6 +53,8 @@ RunInput → HITLOrchestrator → AIProvider → HITL Checkpoints → Result
 
 The orchestrator automatically gathers attachments by probing recent session history (see `_gather_attachments()` in `llm_backend/core/hitl/orchestrator.py`). If a required asset is missing, the payload validation step surfaces a blocking issue and pauses the run for human intervention.
 
+**Attachment Resolution Fallback**: When AI agents fail or produce incomplete payloads, a schema-aware fallback cascade ensures user attachments are mapped to the correct field by checking the model's `example_input` schema. This prevents attachments from being dropped when fields are filtered by `_filter_payload_to_schema()`. See `docs/FORM_BASED_HITL.md` for detailed fallback behavior.
+
 ## Provider-Agnostic Architecture
 
 The new architecture separates concerns into three layers:

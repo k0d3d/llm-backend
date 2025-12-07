@@ -116,7 +116,13 @@ docker run -p 8000:8000 --env-file .env tohju-llm-backend
 - Handles both single string fields AND array fields (not just arrays)
 - Prioritizes CONTENT fields over CONFIG fields
 - Falls back to improved heuristic matching with 0.9+ confidence for exact matches
-- Critical fix: Previous hardcoded logic only checked array fields, missing single "image" fields
+
+**Schema-Aware Attachment Fallback**: When AI agents fail or produce incomplete payloads, a cascade of fallbacks ensures user attachments are mapped:
+1. **Schema field matching**: Check if common attachment fields (`input_image`, `image`, etc.) exist in `example_input` schema
+2. **Heuristic matching**: Find any schema field with attachment-like name (`image`, `photo`, `file`, `source`, `media`)
+3. **URL field detection**: Find any schema field that contains a URL value (likely an attachment placeholder)
+4. **Logging**: Warns if no suitable field is found, preventing silent failures
+- Critical: Fields are only added if they exist in the model's schema to avoid being filtered by `_filter_payload_to_schema()`
 
 **Auto-Approve Behavior**: When `validation_summary.blocking_issues == 0`, the frontend renders a 10-second countdown with auto-approve. Non-zero blocking issues require human action.
 

@@ -1,8 +1,10 @@
 # HITL System Improvement Plan
 
 **Date**: 2025-10-29
-**Status**: Planned
+**Status**: Partially Implemented
 **Branch**: To be created before implementation
+
+> **Update 2025-12**: Issue 2 (AI Agent Failures) and Issue 3 (Empty Payload Creation) have been partially addressed with schema-aware attachment fallback. When AI agents fail, a cascade of fallbacks now ensures user attachments are mapped to correct fields by checking the model's `example_input` schema. See `docs/FORM_BASED_HITL.md` for implementation details.
 
 ---
 
