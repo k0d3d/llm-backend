@@ -11,6 +11,7 @@ class RunInput(BaseModel):
     agent_email: str
     session_id: str
     message_type: str
+    tenant: str
     log_id: Optional[str] = None
     agent_tool_config: Optional[dict]
     selected_llm: Optional[dict] = None

@@ -28,6 +28,7 @@ def send_data_to_url(data: dict | str, url: str, crew_input: RunInput, message_t
         "messageType": message_type,
         "logId": crew_input.log_id,
         "prompt": crew_input.prompt,
+        "tenant": crew_input.tenant,
         "operationType": data.get("operation_type", "") if isinstance(data, dict) else "text",
     }
 
@@ -62,6 +63,7 @@ async def send_data_to_url_async(data: dict | str, url: str, crew_input: RunInpu
         "messageType": message_type,
         "logId": crew_input.log_id,
         "prompt": crew_input.prompt,
+        "tenant": crew_input.tenant,
         "operationType": data.get("operation_type", "") if isinstance(data, dict) else "text",
     }
 
