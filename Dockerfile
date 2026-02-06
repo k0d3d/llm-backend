@@ -48,7 +48,7 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install dependencies with cache mount (reuses downloads across builds)
 RUN --mount=type=cache,target=$POETRY_CACHE_DIR \
-    poetry install --without dev --no-root --no-ansi
+    poetry install --no-root --no-ansi
 
 # Install additional packages that aren't in poetry (with cache)
 RUN --mount=type=cache,target=/root/.cache/pip \
