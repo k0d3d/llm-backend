@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Poetry with pinned version for reproducibility
-ENV POETRY_VERSION=1.7.1 \
+ENV POETRY_VERSION=2.0.0 \
     POETRY_HOME=/opt/poetry \
     POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_IN_PROJECT=true \
