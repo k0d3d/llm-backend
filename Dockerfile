@@ -71,9 +71,9 @@ RUN groupadd -r appuser --gid=1000 && \
     useradd -r -g appuser --uid=1000 --home-dir=/app --shell=/bin/bash appuser && \
     chown -R appuser:appuser /app
 
-# Copy virtual environment from builder
+# Copy virtual environment and poetry from builder
 ENV VIRTUAL_ENV=/app/.venv \
-    PATH="/app/.venv/bin:$PATH" \
+    PATH="/app/.venv/bin:/opt/poetry/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONHASHSEED=random \
@@ -81,13 +81,14 @@ ENV VIRTUAL_ENV=/app/.venv \
     PIP_NO_CACHE_DIR=1
 
 COPY --from=python-deps --chown=appuser:appuser /app/.venv /app/.venv
+COPY --from=python-deps --chown=appuser:appuser /opt/poetry /opt/poetry
 
 # Copy application code (do this last for best caching)
 COPY --chown=appuser:appuser . /app
 
 # Install the package itself (just creates links, very fast)
 RUN --mount=type=cache,target=/tmp/poetry_cache \
-    /app/.venv/bin/poetry install --only-root
+    poetry install --only-root
 
 # Switch to non-root user
 USER appuser
