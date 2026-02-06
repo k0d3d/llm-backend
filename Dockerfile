@@ -52,8 +52,8 @@ RUN --mount=type=cache,target=$POETRY_CACHE_DIR \
 
 # Install additional packages that aren't in poetry (with cache)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    poetry run pip install --no-deps \
-        pydantic-ai==0.2.14 \
+    poetry run pip install \
+        "pydantic-ai[openai,anthropic,replicate]==0.2.14" \
         psycopg2-binary==2.9.10
 
 # Install poetry plugins
