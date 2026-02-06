@@ -123,7 +123,13 @@ class HITLOrchestrator:
 
         # Reconstruct config and run_input from state
         config = state.config
-        run_input = RunInput(**state.original_input)
+        try:
+            run_input = RunInput(**state.original_input)
+        except Exception as e:
+            print(f"⚠️ Failed to reconstruct RunInput from state: {e}")
+            print(f"   Original input keys: {list(state.original_input.keys()) if isinstance(state.original_input, dict) else 'N/A'}")
+            # Fallback to normalized input if RunInput fails
+            run_input = cls._normalize_run_input(state.original_input)
 
         # Create orchestrator instance
         orchestrator = cls(provider, config, run_input, state_manager, websocket_bridge)
@@ -142,7 +148,8 @@ class HITLOrchestrator:
 
         return orchestrator
 
-    def _normalize_run_input(self, run_input):
+    @staticmethod
+    def _normalize_run_input(run_input):
         """Ensure run_input is a structured object with attribute access."""
         if run_input is None:
             return AttributeDict()

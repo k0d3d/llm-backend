@@ -11,9 +11,9 @@ class RunInput(BaseModel):
     agent_email: str
     session_id: str
     message_type: str
-    tenant: str
+    tenant: str = "tohju"
     log_id: Optional[str] = None
-    agent_tool_config: Optional[dict]
+    agent_tool_config: Optional[dict] = None
     selected_llm: Optional[dict] = None
     conversation: Optional[List[Dict[str, Any]]] = None
 
