@@ -8,7 +8,7 @@ FROM python:${PYTHON_VER}-slim AS base
 # Install only runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
-    libgl1-mesa-glx \
+    libgl1 \
     ffmpeg \
     libavcodec-extra \
     postgresql-client \
@@ -91,13 +91,6 @@ RUN --mount=type=cache,target=/tmp/poetry_cache \
 
 # Switch to non-root user
 USER appuser
-
-# Health check (adjust endpoint as needed)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
-
-# Expose port if needed
-EXPOSE 8000
 
 # Use exec form for proper signal handling
 CMD ["bash", "start.sh"]
