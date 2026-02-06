@@ -48,14 +48,13 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install dependencies with cache mount (reuses downloads across builds)
 RUN --mount=type=cache,target=$POETRY_CACHE_DIR \
-    poetry lock --no-update && \
     poetry install --no-root --no-ansi
 
 # Install additional packages that aren't in poetry (with cache)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    poetry run pip install \
-        "pydantic-ai[openai,anthropic,replicate]==0.2.14" \
-        psycopg2-binary==2.9.10
+    poetry run pip install --no-deps \
+    pydantic-ai==0.2.14 \
+    psycopg2-binary==2.9.10
 
 # Install poetry plugins
 RUN poetry self add poetry-plugin-dotenv@latest
