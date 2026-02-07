@@ -47,17 +47,20 @@ class SchemaExtractor:
             is_content = cls._is_content_field(key, value)
             
             # Smarter requirement heuristic:
-            # 1. Content fields are candidate for requirement
-            # 2. Lists are required ONLY if it's an editing model (where image_input=[] is a failure)
-            # 3. Specifically optional fields are excluded
-            is_required = is_content
+            # 1. Prompt/Text fields are ALWAYS required
+            # 2. Other content fields are candidate but not strictly required to avoid false positives
+            # 3. We let the API (or Error Recovery) handle specific model failures
+            key_lower = key.lower()
+            is_required = False
             
-            if isinstance(value, list) and not is_editing:
-                is_required = False
-            
-            # Negative signals for requirement
-            if any(k in key.lower() for k in ["negative", "optional", "mask", "face"]):
-                is_required = False
+            if is_content:
+                if any(k in key_lower for k in ["prompt", "text", "input", "instruction"]):
+                    # Primary prompt field is required
+                    is_required = True
+                
+                # Specifically exclude non-essential content
+                if any(k in key_lower for k in ["negative", "optional", "mask", "face", "face_image"]):
+                    is_required = False
 
             # Determine default value
             # CRITICAL: For CONTENT fields, we explicit force None/Empty to avoid leakage

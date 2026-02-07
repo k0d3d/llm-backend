@@ -63,16 +63,18 @@ class PayloadBuilder:
             
             RULES:
             1. **Schema Adherence**: Use ONLY fields defined in the schema.
-            2. **Zero Hallucination**: If a value is not in the User Request and has no default, leave it null.
-            3. **Attachment Mapping**: Map media URLs to appropriate fields (e.g. image_input, audio_file).
-            4. **Explicit Edits**: Values in 'explicit_edits' are AUTHORITATIVE. Use them exactly.
-            5. **Config vs Content**: 
+            2. **Partial Fulfillment**: Fill every field you can identify from the User Request. If a required field is missing (like an image), still fill the other fields (like the prompt).
+            3. **Prompt Mapping**: The 'User Prompt' in the context is the primary instruction. Map it to the schema's 'CONTENT' field that represents the prompt, input, or text.
+            4. **Zero Hallucination**: If a value is absolutely not in the User Request and has no default, leave it null.
+            5. **Attachment Mapping**: Map media URLs to appropriate fields (e.g. image_input, audio_file).
+            6. **Explicit Edits**: Values in 'explicit_edits' are AUTHORITATIVE. Use them exactly.
+            7. **Config vs Content**: 
                - Config (numbers/toggles): Use schema defaults unless the user requests changes.
                - Content (prompts/images): MUST come from the User Request. NEVER use demo values.
             
             OUTPUT REQUIREMENT:
             Return a JSON object with:
-            - "parameters": The dictionary of API fields.
+            - "parameters": The dictionary of API fields. MUST include the prompt/text if provided.
             - "reasoning": Your explanation.
             """
         )
@@ -88,7 +90,8 @@ class PayloadBuilder:
                     "type": f.type.value,
                     "description": f.description or "",
                     "default": f.default_value,
-                    "is_content_field": f.is_content
+                    "is_content_field": f.is_content,
+                    "is_required": f.is_required
                 }
                 for name, f in schema.fields.items()
             },
@@ -96,15 +99,20 @@ class PayloadBuilder:
         }
         
         prompt = f"""
-        TASK: Construct the 'parameters' for the API call based on the schema below.
-        
-        SCHEMA DEFINITION:
-        {json.dumps(schema_desc, indent=2)}
+        TASK: 
+        1. Read the 'USER REQUEST CONTEXT' below.
+        2. Identify the 'USER PROMPT' (the text instruction).
+        3. Map that instruction to the appropriate field in the 'SCHEMA DEFINITION' (usually named 'prompt', 'text', or 'input').
+        4. Check for any attachments (URLs) and map them to media fields (like 'image', 'audio', 'image_input').
+        5. If a field is 'REQUIRED' but you cannot find a value, leave it null (do NOT invent URLs).
         
         USER REQUEST CONTEXT:
         {context.get_llm_view()}
         
-        Construct the response now.
+        SCHEMA DEFINITION:
+        {json.dumps(schema_desc, indent=2)}
+        
+        Construct the 'parameters' dictionary and provide your reasoning.
         """
         
         result = await agent.run(prompt)
