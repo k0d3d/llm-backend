@@ -139,6 +139,16 @@ class ReplicateProvider(AIProvider):
         if not isinstance(schema, dict):
             return payload
 
+        # Extract example URLs to filter them out from the payload if they are leaking
+        example_urls = set()
+        for value in schema.values():
+            if isinstance(value, str) and value.startswith("http"):
+                example_urls.add(value)
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, str) and v.startswith("http"):
+                        example_urls.add(v)
+
         filtered: Dict[str, Any] = {}
 
         for field, schema_value in schema.items():
@@ -152,16 +162,23 @@ class ReplicateProvider(AIProvider):
             elif isinstance(schema_value, list):
                 normalized_list = value if isinstance(value, list) else [value]
 
+                # Filter out example URLs from the list
+                filtered_list = [v for v in normalized_list if v not in example_urls]
+
                 if schema_value and isinstance(schema_value[0], dict):
                     filtered[field] = [
                         self._filter_payload_to_schema(item, schema_value[0])
                         if isinstance(item, dict)
                         else item
-                        for item in normalized_list
+                        for item in filtered_list
                     ]
                 else:
-                    filtered[field] = normalized_list
+                    filtered[field] = filtered_list
             else:
+                # Filter out example URLs from single values
+                if isinstance(value, str) and value in example_urls:
+                    print(f"🧹 _filter_payload_to_schema: Stripped example URL from field '{field}'")
+                    continue
                 filtered[field] = value
 
         return filtered
@@ -507,9 +524,7 @@ class ReplicateProvider(AIProvider):
                     if filtered_list != value:
                         example_input_data[field] = filtered_list
                         print(f"🧹 Stripped example URLs from list field '{field}'")
-
         if primary_attachment:
-            print(f"🔧 Attempting to assign primary_attachment to example_input_data...")
             image_fields = [
                 "input_image",
                 "image",
@@ -851,12 +866,37 @@ class ReplicateProvider(AIProvider):
         """Execute Replicate model request"""
         start_time = time.time()
 
+        # Prepare model parameters for execution
+        # We need to ensure example_input URLs are stripped here too
+        exec_example_input = deepcopy(self.example_input)
+        if isinstance(exec_example_input, dict):
+            # Extract example URLs to filter them out
+            example_urls = set()
+            for value in exec_example_input.values():
+                if isinstance(value, str) and value.startswith("http"):
+                    example_urls.add(value)
+                elif isinstance(value, list):
+                    for v in value:
+                        if isinstance(v, str) and v.startswith("http"):
+                            example_urls.add(v)
+            
+            # Strip them
+            for field, value in list(exec_example_input.items()):
+                if isinstance(value, str) and value in example_urls:
+                    exec_example_input[field] = None
+                    print(f"🧹 execute: Stripped example URL from field '{field}'")
+                elif isinstance(value, list):
+                    filtered_list = [v for v in value if v not in example_urls]
+                    if filtered_list != value:
+                        exec_example_input[field] = filtered_list
+                        print(f"🧹 execute: Stripped example URLs from list field '{field}'")
+
         try:
             # Use existing run_replicate function
             run, status_code = run_replicate(
                 run_input=self.run_input,
                 model_params={
-                    "example_input": self.example_input,
+                    "example_input": exec_example_input,
                     "latest_version": self.latest_version,
                 },
                 input=payload.input,

@@ -1509,7 +1509,9 @@ class HITLOrchestrator:
                 # Fallback to full attachment discovery
                 attachments_to_use = self._gather_attachments()
 
-            payload = self.provider.create_payload(
+            # Start both payload creation and its subsequent validation/analysis if possible
+            # Note: We still need payload for some checks, but we can parallelize or pre-calculate
+            payload = await self.provider.create_payload(
                 prompt=prompt_to_use,
                 attachments=attachments_to_use,
                 operation_type=operation_type,
@@ -1518,13 +1520,10 @@ class HITLOrchestrator:
                 hitl_edits=hitl_edits or None
             )
 
-            if asyncio.iscoroutine(payload):
-                payload = await payload
-
             # Validate payload with same attachments
             validation_issues = self.provider.validate_payload(
                 payload,
-                self.run_input.prompt,
+                prompt_to_use,
                 attachments_to_use
             )
             
@@ -1764,7 +1763,7 @@ class HITLOrchestrator:
             # Fallback to full attachment discovery
             attachments_to_use = self._gather_attachments()
 
-        payload = self.provider.create_payload(
+        payload = await self.provider.create_payload(
             prompt=prompt_to_use,
             attachments=attachments_to_use,
             operation_type=self._infer_operation_type(),
@@ -1772,9 +1771,6 @@ class HITLOrchestrator:
             conversation=getattr(self.run_input, 'conversation', None),
             hitl_edits=hitl_edits or None
         )
-
-        if asyncio.iscoroutine(payload):
-            payload = await payload
         
         # Note: HITL edits are now handled by the intelligent agent in create_payload()
         # This eliminates the need for manual field mapping and override logic
