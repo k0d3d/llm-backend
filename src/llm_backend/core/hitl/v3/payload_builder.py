@@ -6,7 +6,7 @@ from .context_assembler import RequestContext
 import json
 
 class CandidatePayload(BaseModel):
-    input: Dict[str, Any]
+    payload: Dict[str, Any]
     reasoning: str
 
 class PayloadBuilder:
@@ -36,12 +36,12 @@ class PayloadBuilder:
             
             CRITICAL OUTPUT REQUIREMENT:
             You MUST return a JSON object with EXACTLY these keys:
-            - "input": A dictionary containing the constructed payload fields. THIS IS MANDATORY.
+            - "payload": A dictionary containing the constructed payload fields. THIS IS MANDATORY.
             - "reasoning": A string explaining your decisions.
             
             Example:
             {
-                "input": {"prompt": "a dog", "width": 512},
+                "payload": {"prompt": "a dog", "width": 512},
                 "reasoning": "Mapped user prompt to 'prompt' and used default width."
             }
             """

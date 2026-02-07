@@ -400,7 +400,7 @@ class DatabaseStateStore(HITLStateStore):
             logger.warning(f"Failed to create JSONB indexes: {e}")
     
     async def save_state(self, state: HITLState) -> None:
-        """Save state to database (async-safe)"""
+        """Save state to database (async-safe and race-condition robust)"""
         def _save():
             session = self.SessionLocal()
             try:
@@ -409,10 +409,10 @@ class DatabaseStateStore(HITLStateStore):
                 if provider_name == "unknown" and hasattr(state, 'metadata') and state.metadata:
                     provider_name = state.metadata.get("provider_name", "unknown")
 
-                # Use merge directly for true idempotency
-                # We construct a transient object and let SQLAlchemy handle the upsert
+                # 1. UPSERT RUN: Try to find existing first
+                existing_run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).with_for_update().first()
+                
                 run_data = {
-                    "run_id": run_uuid,
                     "status": _enum_value(state.status),
                     "current_step": _enum_value(state.current_step),
                     "provider_name": provider_name,
@@ -439,36 +439,41 @@ class DatabaseStateStore(HITLStateStore):
                     "state_snapshot": _serialize_json(state.model_dump())
                 }
 
-                # We can't easily merge without fetching first if we want to preserve created_at
-                # But we can use an explicit UPDATE if it exists, or INSERT if not.
-                # merge() is designed for this.
-                run_obj = HITLRun(**run_data)
-                session.merge(run_obj)
+                if existing_run:
+                    for key, value in run_data.items():
+                        setattr(existing_run, key, value)
+                else:
+                    new_run = HITLRun(run_id=run_uuid, created_at=datetime.utcnow(), **run_data)
+                    session.add(new_run)
                 
-                # Save step events
+                # 2. SAVE EVENTS: Avoid duplicates
                 for event in state.step_history:
-                    event_data = {
-                        "run_id": run_uuid,
-                        "step": _enum_value(event.step),
-                        "status": _enum_value(event.status),
-                        "timestamp": event.timestamp,
-                        "actor": event.actor,
-                        "message": event.message,
-                        "event_metadata": _serialize_json(event.metadata)
-                    }
-                    event_obj = HITLStepEvent(**event_data)
-                    
-                    # For events, we check existence to avoid duplicates
+                    step_val = _enum_value(event.step)
                     exists = session.query(HITLStepEvent).filter(
                         HITLStepEvent.run_id == run_uuid,
-                        HITLStepEvent.step == event_data["step"],
-                        HITLStepEvent.timestamp == event_data["timestamp"]
+                        HITLStepEvent.step == step_val,
+                        HITLStepEvent.timestamp == event.timestamp
                     ).first()
                     
                     if not exists:
-                        session.add(event_obj)
+                        new_event = HITLStepEvent(
+                            run_id=run_uuid,
+                            step=step_val,
+                            status=_enum_value(event.status),
+                            timestamp=event.timestamp,
+                            actor=event.actor,
+                            message=event.message,
+                            event_metadata=_serialize_json(event.metadata)
+                        )
+                        session.add(new_event)
                 
-                session.commit()
+                try:
+                    session.commit()
+                except Exception as commit_error:
+                    session.rollback()
+                    # Final fallback: session.merge
+                    session.merge(HITLRun(run_id=run_uuid, **run_data))
+                    session.commit()
             except Exception as e:
                 session.rollback()
                 raise e

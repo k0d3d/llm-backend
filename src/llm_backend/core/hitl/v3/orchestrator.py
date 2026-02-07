@@ -184,11 +184,11 @@ class HITLOrchestratorV3:
             # 3. FABRICATION: Build Candidate Payload
             self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
             candidate = await PayloadBuilder.build(context, schema)
-            self.state.suggested_payload = candidate.input
+            self.state.suggested_payload = candidate.payload
             print(f"🛠️ Fabrication: Candidate payload created. Reasoning: {candidate.reasoning[:100]}...")
 
             # 4. GUARD: Validate Payload
-            issues = Validator.validate(candidate.input, schema)
+            issues = Validator.validate(candidate.payload, schema)
             self.state.validation_issues = [i.model_dump() for i in issues]
             
             # Check for blocking errors
@@ -207,7 +207,7 @@ class HITLOrchestratorV3:
             
             replicate_payload = ReplicatePayload(
                 provider_name="replicate",
-                input=candidate.input,
+                input=candidate.payload,
                 operation_type=self._infer_operation_type(),
                 model_version=self.latest_version
             )

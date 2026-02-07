@@ -8,27 +8,22 @@ from llm_backend.core.types.common import RunInput, MessageType, T_MessageType
 def send_data_to_url(data: dict | str, url: str, crew_input: RunInput, message_type: T_MessageType = MessageType["AGENT_MESSAGE"]):
     """
     Send data to a server using a stream.
-
-    Args:
-    - data_generator: A generator that yields data to send.
-    - url: The URL of the server to send the data to.
-
-    Returns:
-    - response: The response object returned by the server.
     """
+    if crew_input is None:
+        print(f"⚠️ send_data_to_url: crew_input is None, skipping request to {url}")
+        return None
 
     # Build the correct user field
-    # Construct the data payload with the corrected user field structure
     payload_data = {
-        "sessionId": crew_input.session_id,
+        "sessionId": getattr(crew_input, 'session_id', None),
         "content": data,
-        "destination": crew_input.user_email,
-        "userId": crew_input.user_id,
-        "sender": crew_input.agent_email,
+        "destination": getattr(crew_input, 'user_email', None),
+        "userId": getattr(crew_input, 'user_id', None),
+        "sender": getattr(crew_input, 'agent_email', None),
         "messageType": message_type,
-        "logId": crew_input.log_id,
-        "prompt": crew_input.prompt,
-        "tenant": crew_input.tenant,
+        "logId": getattr(crew_input, 'log_id', None),
+        "prompt": getattr(crew_input, 'prompt', None),
+        "tenant": getattr(crew_input, 'tenant', 'tohju'),
         "operationType": data.get("operation_type", "") if isinstance(data, dict) else "text",
     }
 

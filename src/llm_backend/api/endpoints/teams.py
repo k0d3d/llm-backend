@@ -157,7 +157,7 @@ async def run_replicate_team(
                 session_id=run_session_id
             )
 
-            # Set as active run for session
+            # Set as active run for session IMMEDIATELY
             if state_manager and run_session_id:
                 await state_manager.set_active_run_id(run_session_id, run_id)
                 print(f"✅ Set run {run_id} as active for session {run_session_id}")
