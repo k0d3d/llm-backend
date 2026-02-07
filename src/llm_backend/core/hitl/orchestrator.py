@@ -38,9 +38,11 @@ class HITLOrchestrator:
         # Initialize HITL message client for sending checkpoints via /from-llm
         self.hitl_message_client = HITLMessageClient()
 
-        # Extract session_id and user_id for messaging
+        # Extract session_id, user_id and tenant for messaging
         self.session_id = None
         self.user_id = None
+        self.tenant = "tohju"  # Default tenant
+
         if hasattr(self.run_input, 'session_id'):
             self.session_id = self.run_input.session_id
         elif isinstance(self.run_input, dict):
@@ -50,6 +52,11 @@ class HITLOrchestrator:
             self.user_id = self.run_input.user_id
         elif isinstance(self.run_input, dict):
             self.user_id = self.run_input.get('user_id')
+
+        if hasattr(self.run_input, 'tenant'):
+            self.tenant = self.run_input.tenant
+        elif isinstance(self.run_input, dict):
+            self.tenant = self.run_input.get('tenant', "tohju")
 
         # Debug logging for persistence components
         print("🔧 HITLOrchestrator initialized:")
@@ -1339,7 +1346,10 @@ class HITLOrchestrator:
                 user_id=self.user_id or "unknown",
                 content=nl_prompt.message,
                 checkpoint_type="information_request",
-                checkpoint_data=checkpoint_data
+                checkpoint_data=checkpoint_data,
+                tenant=self.tenant,
+                prompt=getattr(self.run_input, 'prompt', ""),
+                operation_type=self._infer_operation_type().value if hasattr(self._infer_operation_type(), 'value') else str(self._infer_operation_type())
             )
             print(f"✅ Sent information request checkpoint as message")
         except Exception as e:
@@ -1558,7 +1568,10 @@ class HITLOrchestrator:
                             "run_id": self.run_id,
                             "critical_issues": [issue.dict() for issue in critical_issues],
                             "missing_inputs": self._identify_missing_inputs(critical_issues),
-                        }
+                        },
+                        tenant=self.tenant,
+                        prompt=getattr(self.run_input, 'prompt', ""),
+                        operation_type=self._infer_operation_type().value if hasattr(self._infer_operation_type(), 'value') else str(self._infer_operation_type())
                     )
                     print(f"✅ Sent payload validation error message to user")
                 except Exception as e:
@@ -1689,7 +1702,10 @@ class HITLOrchestrator:
                 user_id=self.user_id or "unknown",
                 content=nl_error,
                 checkpoint_type="error_recovery",
-                checkpoint_data=checkpoint_data
+                checkpoint_data=checkpoint_data,
+                tenant=self.tenant,
+                prompt=getattr(self.run_input, 'prompt', ""),
+                operation_type=self._infer_operation_type().value if hasattr(self._infer_operation_type(), 'value') else str(self._infer_operation_type())
             )
             print(f"✅ Sent error recovery checkpoint as message")
 

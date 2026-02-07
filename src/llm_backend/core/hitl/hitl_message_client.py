@@ -35,7 +35,10 @@ class HITLMessageClient:
         user_id: str,
         content: str,
         checkpoint_type: str,
-        checkpoint_data: Dict[str, Any]
+        checkpoint_data: Dict[str, Any],
+        tenant: str = "tohju",
+        prompt: str = "",
+        operation_type: str = "text"
     ) -> Dict[str, Any]:
         """
         Send HITL checkpoint as a message via /from-llm.
@@ -49,22 +52,12 @@ class HITLMessageClient:
             content: Natural language message (e.g., "Oops! That aspect ratio isn't supported...")
             checkpoint_type: "error_recovery", "form_requirements", etc.
             checkpoint_data: HITL metadata (error_field, valid_values, run_id, etc.)
+            tenant: Tenant identifier (e.g., "tohju")
+            prompt: Original user prompt
+            operation_type: Type of operation (e.g., "image_generation")
 
         Returns:
             Response from /from-llm endpoint with messageId
-
-        Example:
-            await client.send_hitl_checkpoint(
-                session_id="abc123",
-                user_id="user456",
-                content="Oops! That aspect ratio isn't supported. Try 16:9, 1:1, or 21:9.",
-                checkpoint_type="error_recovery",
-                checkpoint_data={
-                    "run_id": "hitl_xyz",
-                    "error_field": "aspect_ratio",
-                    "valid_values": ["16:9", "1:1", "21:9"]
-                }
-            )
         """
         # Build props with HITL metadata
         props = {
@@ -82,6 +75,9 @@ class HITLMessageClient:
             "messageType": "hitl_checkpoint",  # Special message type for HITL
             "destination": "user",
             "logId": checkpoint_data.get("run_id", ""),
+            "tenant": tenant,
+            "prompt": prompt,
+            "operationType": operation_type,
             "props": props  # HITL metadata stored here
         }
 
