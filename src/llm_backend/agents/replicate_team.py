@@ -153,7 +153,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=AttachmentDiscoveryContext,
             output_type=AttachmentDiscoveryResult,
             system_prompt=(
@@ -242,7 +242,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=FileRequirementContext,
             output_type=FileRequirementAnalysis,
             system_prompt=(
@@ -285,7 +285,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=PayloadValidationContext,
             output_type=PayloadValidationOutput,
             system_prompt=(
@@ -320,7 +320,7 @@ class ReplicateTeam:
         """Agent that generates the Replicate API payload from example input and prompt."""
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=ExampleInput,
             output_type=AgentPayload,
             system_prompt=(
@@ -374,7 +374,7 @@ class ReplicateTeam:
         """Agent that analyzes if the request can proceed or needs more information."""
         
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=InformationInputPayload,
             output_type=InformationInputResponse,
             system_prompt=(
@@ -403,13 +403,14 @@ class ReplicateTeam:
             """Execute the Replicate API call with the provided payload."""
             payload_dict = ctx.deps.input.model_dump()
             result = await run_replicate(
+                run_input=self.run_input,
                 version=ctx.deps.version or self.latest_version,
                 input_data=payload_dict,
             )
             return result
         
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=AgentPayload,
             system_prompt=(
                 """
@@ -432,7 +433,7 @@ class ReplicateTeam:
         """Agent that audits and formats the Replicate API response."""
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             system_prompt=(
                 """
                 You are a Response Audit Agent. Extract the output URLs from the Replicate API response.
@@ -475,7 +476,7 @@ class ReplicateTeam:
             }
 
         agent = Agent(
-            "openai:gpt-4.1-mini",
+            "openai:gpt-4o-mini",
             deps_type=FinalGuardContext,
             output_type=FinalGuardDecision,
             system_prompt=(

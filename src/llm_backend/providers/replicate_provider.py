@@ -527,6 +527,12 @@ class ReplicateProvider(AIProvider):
             hitl_enabled=True
         )
 
+        # Get structured form values if available from orchestrator
+        structured_form_values = None
+        if hasattr(self, '_orchestrator') and self._orchestrator and self._orchestrator.state.form_data:
+            structured_form_values = self._orchestrator.state.form_data.get("current_values")
+            print(f"📋 Including {len(structured_form_values)} structured form values in agent input")
+
         agent_input = ExampleInput(
             prompt=clean_prompt,
             example_input=example_input_data,
@@ -536,7 +542,7 @@ class ReplicateProvider(AIProvider):
             hitl_edits=hitl_edits,
             schema_metadata=self.field_metadata,
             hitl_field_metadata=self.hitl_alias_metadata,
-            structured_form_values=None,
+            structured_form_values=structured_form_values,
             conversation=conversation,
         )
 
@@ -812,41 +818,14 @@ class ReplicateProvider(AIProvider):
         """Execute Replicate model request"""
         start_time = time.time()
 
-        # Prepare model parameters for execution
-        # We need to ensure example_input URLs are stripped here too
-        exec_example_input = deepcopy(self.example_input)
-        if isinstance(exec_example_input, dict):
-            # Extract example URLs to filter them out
-            example_urls = set()
-            for value in exec_example_input.values():
-                if isinstance(value, str) and value.startswith("http"):
-                    example_urls.add(value)
-                elif isinstance(value, list):
-                    for v in value:
-                        if isinstance(v, str) and v.startswith("http"):
-                            example_urls.add(v)
-            
-            # Strip them
-            for field, value in list(exec_example_input.items()):
-                if isinstance(value, str) and value in example_urls:
-                    exec_example_input[field] = None
-                    print(f"🧹 execute: Stripped example URL from field '{field}'")
-                elif isinstance(value, list):
-                    filtered_list = [v for v in value if v not in example_urls]
-                    if filtered_list != value:
-                        exec_example_input[field] = filtered_list
-                        print(f"🧹 execute: Stripped example URLs from list field '{field}'")
-
         try:
             # Use existing run_replicate function
+            # Authority is now entirely with payload.input
             run, status_code = run_replicate(
                 run_input=self.run_input,
-                model_params={
-                    "example_input": exec_example_input,
-                    "latest_version": self.latest_version,
-                },
                 input=payload.input,
                 operation_type=payload.operation_type.value,
+                version=self.latest_version
             )
 
             execution_time = int((time.time() - start_time) * 1000)

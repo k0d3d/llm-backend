@@ -17,40 +17,45 @@ CORE_API_URL = os.getenv("CORE_API_URL", "https://core-api-d1kvr2.asyncdev.worke
 
 
 def run_replicate(
-    run_input: RunInput,
-    model_params: dict,
-    input: PayloadInput,
-    operation_type: str,
+    run_input: RunInput = None,
+    model_params: dict = None,
+    input: PayloadInput = None,
+    operation_type: str = "image",
+    **kwargs
     ):
+        # Support for agent tool calling style: run_replicate(version=..., input_data=...)
+        version = kwargs.get("version") or (model_params.get("latest_version") if model_params else None)
+        input_data = kwargs.get("input_data")
+        
+        if input_data:
+            body_input = input_data
+        else:
+            # check if input is json string and attempt to convert it to object
+            if isinstance(input, PayloadInput):
+                try:
+                    body_input = input.model_dump()
+                except Exception:
+                    body_input = {}
+            elif isinstance(input, dict):
+                body_input = input
+            else:
+                body_input = {}
+
+        # The body of the request
+        body = {
+            "input": body_input,
+            "version": version,
+            "webhook": f"{TOHJU_NODE_API}/api/webhooks/onReplicateComplete",
+            "webhook_events_filter": ["start", "completed"],
+        }
+
         # Define the URL for the POST request
         url = "https://api.replicate.com/v1/predictions"
 
         # Define the headers, typically you'd need authorization and content type headers
         headers = {
-            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",  # Replace with your actual API key
+            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
             "Content-Type": "application/json",
-        }
-
-        # check if input is json string and attempt to convert it to object
-        if isinstance(input, PayloadInput):
-            try:
-                # Attempt to load the JSON string into a Python object
-                input = input.model_dump()
-                # input = json.loads(input.replace("'", '"'))
-            except json.JSONDecodeError as e:
-                # Handle the case where the input string is not valid JSON
-                input = {}
-
-        example_input = model_params.get("example_input", {})
-        body_input = {**example_input, **(input if input is not None else {}) }
-        # return response_object
-
-        # The body of the request
-        body = {
-            "input": body_input,
-            "version": model_params.get("latest_version"),
-            "webhook": f"{TOHJU_NODE_API}/api/webhooks/onReplicateComplete",
-            "webhook_events_filter": ["start", "completed"],  # Only send webhooks on start and completion
         }
 
         print(f"🚀 Making Replicate API call to: {url}")
@@ -66,15 +71,16 @@ def run_replicate(
         if response.status_code in [200, 201]:
             prediction = response.json()
             message_type = MessageType["REPLICATE_PREDICTION"]
-            send_data_to_url(
-                data={
-                    "prediction": prediction,
-                    "operation_type": operation_type,
-                },
-                url=f"{TOHJU_NODE_API}/api/webhooks/onReplicateStarted",
-                crew_input=run_input,
-                message_type=message_type,
-            )
+            if run_input:
+                send_data_to_url(
+                    data={
+                        "prediction": prediction,
+                        "operation_type": operation_type,
+                    },
+                    url=f"{TOHJU_NODE_API}/api/webhooks/onReplicateStarted",
+                    crew_input=run_input,
+                    message_type=message_type,
+                )
             return response.json(), response.status_code
 
         # Handle error responses - return structured error
