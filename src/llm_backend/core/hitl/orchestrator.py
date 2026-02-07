@@ -2101,8 +2101,15 @@ class HITLOrchestrator:
         if self.state_manager:
             print("💾 Saving step event to database...")
             import asyncio
-            loop = asyncio.get_event_loop()
-            loop.create_task(self.state_manager.save_state(self.state))
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.state_manager.save_state(self.state))
+                else:
+                    loop.run_until_complete(self.state_manager.save_state(self.state))
+            except RuntimeError:
+                # No event loop in this thread, or it's closed
+                asyncio.run(self.state_manager.save_state(self.state))
         else:
             print("⚠️ No state_manager - step event NOT saved to database")
             try:

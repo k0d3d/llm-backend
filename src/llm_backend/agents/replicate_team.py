@@ -40,7 +40,8 @@ class ReplicateTeam:
         self.field_metadata = tool_config.get("field_metadata", {}) or {}
         self.hitl_alias_metadata = tool_config.get("hitl_alias_metadata", {}) or {}
         self.hitl_edits: Dict[str, Any] = {}
-        self.attachments = self._collect_attachments()
+        # Initial deterministic attachment collection
+        self.attachments = self._deterministic_collect_attachments()
         resolved_edits = self._resolve_hitl_edits()
         if resolved_edits:
             self.hitl_edits.update(resolved_edits)
@@ -68,8 +69,8 @@ class ReplicateTeam:
 
         return context_fragments
 
-    def _collect_attachments(self) -> List[str]:
-        """Gather candidate attachment URLs from run input and tool config, with AI fallback."""
+    def _deterministic_collect_attachments(self) -> List[str]:
+        """Gather candidate attachment URLs from run input and tool config (sync)."""
         attachments: List[str] = []
         sources: List[Dict[str, Any]] = []
 
@@ -99,45 +100,44 @@ class ReplicateTeam:
             last_asset = source.get("last_uploaded_asset")
             if isinstance(last_asset, str) and last_asset and last_asset not in attachments:
                 attachments.append(last_asset)
-
-        # If deterministic harvesting failed, use AI assistant
-        if not attachments and self.hitl_enabled:
-            triage_agent = self._attachment_triage_agent()
-            try:
-                async def run_triage() -> AttachmentDiscoveryResult:
-                    discovery = await triage_agent.run(
-                        "Analyze the provided context and identify any media URLs relevant to the model schema.",
-                        deps=AttachmentDiscoveryContext(
-                            prompt=self.prompt,
-                            text_context=self._build_text_context(),
-                            candidate_urls=[],
-                            schema_metadata=self.field_metadata,
-                            hitl_field_metadata=self.hitl_alias_metadata,
-                            expected_media_fields=[field for field, meta in self.field_metadata.items() if meta.get("collection") or "image" in field.lower() or "audio" in field.lower()],
-                        ),
-                    )
-                    return getattr(discovery, "output", None)
-
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(lambda: asyncio.run(run_triage()))
-                        result = future.result()
-                else:
-                    result = asyncio.run(run_triage())
-
-                if isinstance(result, AttachmentDiscoveryResult):
-                    attachments = list(dict.fromkeys(result.attachments or []))
-                    if result.mapping:
-                        # Merge mapping into hitl edits so downstream consumers see structured assignments
-                        for target, url in result.mapping.items():
-                            if isinstance(target, str) and url:
-                                self.hitl_edits[target] = url
-            except Exception as triage_error:
-                print(f"⚠️ Attachment triage agent failed: {triage_error}")
-
+        
         return attachments
+
+    async def async_collect_attachments(self) -> List[str]:
+        """AI-based attachment discovery (async)."""
+        # If deterministic harvesting already found attachments, just return them
+        if self.attachments:
+            return self.attachments
+
+        if not self.hitl_enabled:
+            return []
+
+        triage_agent = self._attachment_triage_agent()
+        try:
+            discovery = await triage_agent.run(
+                "Analyze the provided context and identify any media URLs relevant to the model schema.",
+                deps=AttachmentDiscoveryContext(
+                    prompt=self.prompt,
+                    text_context=self._build_text_context(),
+                    candidate_urls=[],
+                    schema_metadata=self.field_metadata,
+                    hitl_field_metadata=self.hitl_alias_metadata,
+                    expected_media_fields=[field for field, meta in self.field_metadata.items() if meta.get("collection") or "image" in field.lower() or "audio" in field.lower()],
+                ),
+            )
+            result = getattr(discovery, "output", None)
+
+            if isinstance(result, AttachmentDiscoveryResult):
+                self.attachments = list(dict.fromkeys(result.attachments or []))
+                if result.mapping:
+                    # Merge mapping into hitl edits so downstream consumers see structured assignments
+                    for target, url in result.mapping.items():
+                        if isinstance(target, str) and url:
+                            self.hitl_edits[target] = url
+        except Exception as triage_error:
+            print(f"⚠️ Attachment triage agent failed: {triage_error}")
+
+        return self.attachments
 
     def _attachment_triage_agent(self) -> Agent:
         """Agent that inspects prompt/context to discover potential attachments."""
@@ -556,6 +556,9 @@ class ReplicateTeam:
         return payload["message"]
 
     async def run(self):
+        # Ensure attachments are collected (AI triage if needed)
+        await self.async_collect_attachments()
+
         primary_image = (
             self.hitl_edits.get("input_image")
             or self.hitl_edits.get("source_image")

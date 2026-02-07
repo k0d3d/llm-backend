@@ -31,13 +31,14 @@ def run_async(coro):
 
     return loop.run_until_complete(coro)
 
-def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, provider_name: str):
+def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, provider_name: str, run_id: Optional[str] = None):
     """
     Process HITL orchestrator execution
     Args:
         run_input_dict: Serialized RunInput dictionary
         hitl_config_dict: Serialized HITLConfig dictionary
         provider_name: Provider name (e.g., "replicate")
+        run_id: Optional existing run identifier to resume
     Returns:
         Final result
     """
@@ -45,7 +46,8 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
     job.meta['status'] = 'processing'
     job.save_meta()
 
-    logger.info("Starting HITL orchestrator for session: %s", run_input_dict.get('session_id'))
+    logger.info("Starting HITL orchestrator for session: %s (run_id: %s)", 
+                run_input_dict.get('session_id'), run_id)
 
     # Log received data for debugging
     logger.debug("run_input_dict keys: %s", list(run_input_dict.keys()))
@@ -103,13 +105,15 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
         websocket_bridge=websocket_bridge
     )
 
-    # Load existing state if this is a resume
-    run_id = run_input_dict.get('run_id')
-    if run_id:
-        state = run_async(state_manager.load_state(run_id))
+    # Use provided run_id or fallback to run_input_dict
+    target_run_id = run_id or run_input_dict.get('run_id')
+    
+    if target_run_id:
+        state = run_async(state_manager.load_state(target_run_id))
         if state:
             orchestrator.state = state
-            logger.info("Loaded existing state for run %s", run_id)
+            orchestrator.run_id = state.run_id
+            logger.info("Loaded existing state for run %s", target_run_id)
 
     # Execute orchestrator
     logger.info("Executing HITL orchestrator...")
@@ -165,6 +169,7 @@ def process_hitl_resume(run_id: str, approval_response: dict):
 
     # Load state with human edits
     orchestrator.state = state
+    orchestrator.run_id = state.run_id
     logger.debug("Loaded state with human_edits: %s", getattr(state, 'human_edits', 'MISSING'))
 
     # Continue execution

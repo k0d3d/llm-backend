@@ -163,6 +163,7 @@ async def run_replicate_team(
             run_input.dict(),
             hitl_config.dict(),
             "replicate",
+            run_id,
             job_timeout='30m'
         )
 
@@ -242,6 +243,7 @@ async def run_replicate_team_hitl(
         run_input.dict(),
         config.dict(),
         "replicate",
+        run_id,
         job_timeout='30m'
     )
 

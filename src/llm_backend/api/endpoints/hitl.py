@@ -122,8 +122,8 @@ async def start_hitl_run(
         provider_name = None
         
         for tool, config in agent_tool_config.items():
-            if tool in ProviderRegistry._tool_mappings:
-                provider_name = ProviderRegistry._tool_mappings[tool]
+            if tool in ProviderRegistry._tool_mapping:
+                provider_name = ProviderRegistry._tool_mapping[tool]
                 break
         
         if not provider_name:
@@ -160,6 +160,7 @@ async def start_hitl_run(
             request.run_input.dict(),
             hitl_config.dict(),
             provider_name,
+            run_id,
             job_timeout='30m'
         )
 
@@ -688,7 +689,7 @@ async def list_providers() -> Dict[str, Any]:
                 "class": provider_class.__name__,
                 "tools": [
                     tool.value for tool, mapped_provider
-                    in ProviderRegistry._tool_mappings.items()
+                    in ProviderRegistry._tool_mapping.items()
                     if mapped_provider == name
                 ]
             })
