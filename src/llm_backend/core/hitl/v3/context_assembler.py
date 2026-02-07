@@ -29,9 +29,7 @@ class RequestContext(BaseModel):
         if self.explicit_edits:
             parts.append(f"USER EXPLICIT OVERRIDES: {self.explicit_edits}")
             
-        return "
-
-".join(parts)
+        return "\n\n".join(parts)
 
 class ContextAssembler:
     @staticmethod
