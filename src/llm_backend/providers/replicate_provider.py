@@ -766,6 +766,16 @@ class ReplicateProvider(AIProvider):
                 auto_fixable=False
             ))
 
+        # Check for missing prompt (Critical)
+        if prompt and not any(payload.input.get(f) for f in ["prompt", "text", "input", "instruction"]):
+            issues.append(ValidationIssue(
+                field="prompt",
+                issue="Prompt is missing from payload",
+                severity="error",
+                suggested_fix="Ensure the user prompt is mapped to the correct model field",
+                auto_fixable=True
+            ))
+
         # Check for empty values in fields that are present in the payload
         # (Form classifier already determined which fields are required)
         for field_name, field_value in payload.input.items():

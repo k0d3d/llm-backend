@@ -1650,12 +1650,19 @@ class HITLOrchestrator:
 
         # Get current value from payload
         current_value = None
-        if field and isinstance(payload, dict):
-            # Try to find the field in payload structure
-            if hasattr(payload, 'input') and isinstance(payload.input, dict):
-                current_value = payload.input.get(field)
-            elif 'input' in payload:
-                current_value = payload['input'].get(field)
+        if field:
+            # Try to find the field in payload structure (could be dict or Pydantic model)
+            payload_input = None
+            if hasattr(payload, 'input'):
+                payload_input = payload.input
+            elif isinstance(payload, dict) and 'input' in payload:
+                payload_input = payload['input']
+            
+            if payload_input is not None:
+                if isinstance(payload_input, dict):
+                    current_value = payload_input.get(field)
+                elif hasattr(payload_input, field):
+                    current_value = getattr(payload_input, field)
 
         # Fetch full conversation history
         conversation_history = await self._get_conversation_history()
@@ -2068,7 +2075,7 @@ class HITLOrchestrator:
         self.state.updated_at = datetime.utcnow()
 
         # Store checkpoint metadata in state for resume logic
-        if not hasattr(self.state, 'checkpoint_context'):
+        if not hasattr(self.state, 'checkpoint_context') or self.state.checkpoint_context is None:
             self.state.checkpoint_context = {}
 
         if checkpoint_type:
