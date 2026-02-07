@@ -63,18 +63,18 @@ class PayloadBuilder:
             
             RULES:
             1. **Schema Adherence**: Use ONLY fields defined in the schema.
-            2. **Partial Fulfillment**: Fill every field you can identify from the User Request. If a required field is missing (like an image), still fill the other fields (like the prompt).
-            3. **Prompt Mapping**: The 'User Prompt' in the context is the primary instruction. Map it to the schema's 'CONTENT' field that represents the prompt, input, or text.
-            4. **Zero Hallucination**: If a value is absolutely not in the User Request and has no default, leave it null.
-            5. **Attachment Mapping**: Map media URLs to appropriate fields (e.g. image_input, audio_file).
+            2. **Partial Fulfillment (MANDATORY)**: You MUST populate every field you can find data for. If a required field (like 'image_input') is missing, DO NOT let that stop you from filling the 'prompt' field.
+            3. **Prompt Mapping (CRITICAL)**: Map the 'USER PROMPT' to the schema's 'CONTENT' field for text (e.g., 'prompt', 'input', 'text'). **NEVER leave this empty if a prompt exists.**
+            4. **Zero Hallucination**: If a value is absolutely not in the context and has no default, leave it null.
+            5. **Attachment Mapping**: Map media URLs to appropriate fields.
             6. **Explicit Edits**: Values in 'explicit_edits' are AUTHORITATIVE. Use them exactly.
             7. **Config vs Content**: 
-               - Config (numbers/toggles): Use schema defaults unless the user requests changes.
-               - Content (prompts/images): MUST come from the User Request. NEVER use demo values.
+               - Config: Use defaults unless changes are requested.
+               - Content: MUST come from User Request. NEVER use demo values.
             
             OUTPUT REQUIREMENT:
             Return a JSON object with:
-            - "parameters": The dictionary of API fields. MUST include the prompt/text if provided.
+            - "parameters": The dictionary of API fields. MUST NOT BE EMPTY if a user prompt was provided.
             - "reasoning": Your explanation.
             """
         )
@@ -99,12 +99,12 @@ class PayloadBuilder:
         }
         
         prompt = f"""
-        TASK: 
-        1. Read the 'USER REQUEST CONTEXT' below.
-        2. Identify the 'USER PROMPT' (the text instruction).
-        3. Map that instruction to the appropriate field in the 'SCHEMA DEFINITION' (usually named 'prompt', 'text', or 'input').
-        4. Check for any attachments (URLs) and map them to media fields (like 'image', 'audio', 'image_input').
-        5. If a field is 'REQUIRED' but you cannot find a value, leave it null (do NOT invent URLs).
+        CRITICAL TASK: 
+        1. Read the 'USER REQUEST CONTEXT'.
+        2. Extract the 'USER PROMPT' (the core instruction).
+        3. Identify the primary 'CONTENT' field in the 'SCHEMA DEFINITION' (usually 'prompt', 'text', or 'input').
+        4. Populate that field with the user's instruction.
+        5. DO NOT return empty 'parameters' just because other fields are missing.
         
         USER REQUEST CONTEXT:
         {context.get_llm_view()}
@@ -112,7 +112,7 @@ class PayloadBuilder:
         SCHEMA DEFINITION:
         {json.dumps(schema_desc, indent=2)}
         
-        Construct the 'parameters' dictionary and provide your reasoning.
+        Construct the 'parameters' dictionary now. Ensure the user's instruction is included.
         """
         
         result = await agent.run(prompt)

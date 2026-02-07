@@ -54,12 +54,16 @@ class SchemaExtractor:
             is_required = False
             
             if is_content:
-                if any(k in key_lower for k in ["prompt", "text", "input", "instruction"]):
-                    # Primary prompt field is required
+                # Primary prompt field is required - use more precise matching
+                # We want to catch 'prompt', 'text', 'input', 'instruction' but NOT 'image_input'
+                prompt_keywords = ["prompt", "text", "instruction"]
+                is_prompt_field = any(k in key_lower for k in prompt_keywords) or key_lower == "input"
+                
+                if is_prompt_field:
                     is_required = True
                 
-                # Specifically exclude non-essential content
-                if any(k in key_lower for k in ["negative", "optional", "mask", "face", "face_image"]):
+                # Specifically exclude non-essential content and media fields
+                if any(k in key_lower for k in ["negative", "optional", "mask", "face", "image", "audio", "video", "file"]):
                     is_required = False
 
             # Determine default value

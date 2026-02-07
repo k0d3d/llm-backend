@@ -100,14 +100,29 @@ class HITLOrchestratorV3:
         """Start the HITL run and persist initial state to database"""
         # Update run input with user/session info
         if user_id:
-            self.run_input.user_id = user_id
+            if self.run_input is not None:
+                try:
+                    self.run_input.user_id = user_id
+                except AttributeError:
+                    if isinstance(self.run_input, dict):
+                        self.run_input["user_id"] = user_id
             self.user_id = user_id
+            
         if session_id:
-            self.run_input.session_id = session_id
+            if self.run_input is not None:
+                try:
+                    self.run_input.session_id = session_id
+                except AttributeError:
+                    if isinstance(self.run_input, dict):
+                        self.run_input["session_id"] = session_id
             self.session_id = session_id
 
         # Sync state with latest run input values
-        updated_input = self.run_input.model_dump() if hasattr(self.run_input, 'model_dump') else dict(self.run_input)
+        if self.run_input is not None:
+            updated_input = self.run_input.model_dump() if hasattr(self.run_input, 'model_dump') else dict(self.run_input)
+        else:
+            updated_input = {}
+            
         if original_input:
             updated_input.update(original_input)
         self.state.original_input = updated_input
@@ -188,6 +203,17 @@ class HITLOrchestratorV3:
             # 3. FABRICATION: Build Candidate Payload
             self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
             candidate = await PayloadBuilder.build(context, schema)
+            
+            # SAFETY VALVE: If fabrication returned empty parameters but we have a user prompt,
+            # try a final heuristic injection to prevent an unnecessary HITL loop.
+            if not candidate.parameters and context.user_prompt:
+                print("⚠️ Fabrication: LLM returned empty parameters. Applying heuristic safety valve.")
+                for target in ["prompt", "input", "text", "instruction"]:
+                    if target in schema.fields:
+                        candidate.parameters[target] = context.user_prompt
+                        print(f"🔧 Safety Valve: Injected prompt into '{target}'")
+                        break
+
             self.state.suggested_payload = candidate.parameters
             print(f"🛠️ Fabrication: Candidate parameters: {candidate.parameters}")
             print(f"🛠️ Fabrication: Reasoning: {candidate.reasoning[:200]}...")
@@ -206,7 +232,20 @@ class HITLOrchestratorV3:
             # 5. EXECUTION: Call Provider
             self._transition_to_step(HITLStep.API_CALL)
             
-            # Update provider with the fabricated payload
+            # Sync run_input fields one last time to be safe
+            if self.run_input:
+                for attr in ["session_id", "user_id", "tenant"]:
+                    val = getattr(self, attr, None)
+                    if val and not getattr(self.run_input, attr, None):
+                        try:
+                            setattr(self.run_input, attr, val)
+                        except:
+                            if isinstance(self.run_input, dict):
+                                self.run_input[attr] = val
+            
+            # Update provider with the latest run context
+            self.provider.set_run_input(self.run_input)
+            
             # Wrap the raw dictionary from fabrication into a ReplicatePayload object
             from llm_backend.providers.replicate_provider import ReplicatePayload
             
@@ -214,26 +253,26 @@ class HITLOrchestratorV3:
                 provider_name="replicate",
                 input=candidate.parameters,
                 operation_type=self._infer_operation_type(),
-                model_version=self.latest_version
+                model_version=getattr(self.provider, "latest_version", "")
             )
             
-            print(f"🚀 Calling provider {self.provider_name} with parameters: {candidate.parameters}")
+            print(f"🚀 Calling provider {self.provider_name} for model execution")
+            print(f"   Run context: session={getattr(self.run_input, 'session_id', 'MISSING')}, tenant={getattr(self.run_input, 'tenant', 'MISSING')}")
+            
             response = self.provider.execute(replicate_payload)
             
             self.state.raw_response = response.raw_response
             self.state.processed_response = response.processed_response
             
-            # 6. COMPLETION
-            self._transition_to_step(HITLStep.COMPLETED, HITLStatus.COMPLETED)
-            self.state.final_result = self.provider.audit_response(response)
-            
-            if self.state_manager and self.session_id:
-                await self.state_manager.clear_active_run_id(self.session_id)
+            # 6. WAIT FOR WEBHOOK: Do NOT transition to COMPLETED yet
+            # Replicate calls are async. We stay in RUNNING status.
+            # The completion will be logged by the audit event when the webhook triggers.
+            self._add_step_event(HITLStep.API_CALL, HITLStatus.RUNNING, "system", "API call initiated, awaiting webhook results.")
             
             return {
                 "run_id": self.run_id,
-                "status": "completed",
-                "result": self.state.final_result
+                "status": "running",
+                "message": "Model execution started. Results will be delivered via webhook."
             }
 
         except Exception as e:
