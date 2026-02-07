@@ -276,7 +276,7 @@ class HITLOrchestratorV3:
 
     def _infer_operation_type(self) -> Any:
         """Infers the operation type from description"""
-        from ..types import OperationType
+        from llm_backend.core.providers.base import OperationType
         description = (getattr(self.provider, "description", "") or "").lower()
         
         if any(word in description for word in ["image", "picture", "photo"]):

@@ -26,7 +26,7 @@ class OperationType(str, Enum):
 class ProviderPayload(BaseModel):
     """Base class for provider-specific payloads"""
     provider_name: str
-    created_at: datetime = datetime.utcnow()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = {}
 
 

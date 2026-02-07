@@ -4,7 +4,7 @@ HITL orchestrator types and enums
 
 from enum import Enum
 from typing import Optional, Dict, Any, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
 
@@ -65,7 +65,7 @@ class StepEvent(BaseModel):
     """Record of a step event"""
     step: HITLStep
     status: HITLStatus
-    timestamp: datetime = datetime.utcnow()
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
     actor: str  # "system", "human", "agent_name"
     message: Optional[str] = None
     metadata: Dict[str, Any] = {}
@@ -73,11 +73,11 @@ class StepEvent(BaseModel):
 
 class HITLState(BaseModel):
     """Complete state of a HITL run"""
-    run_id: str = str(uuid.uuid4())
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     current_step: HITLStep = HITLStep.CREATED
     status: HITLStatus = HITLStatus.QUEUED
-    created_at: datetime = datetime.utcnow()
-    updated_at: datetime = datetime.utcnow()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
     
     # Configuration

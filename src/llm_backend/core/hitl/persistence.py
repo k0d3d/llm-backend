@@ -408,11 +408,16 @@ class DatabaseStateStore(HITLStateStore):
                 run_uuid = _uuid_value(state.run_id)
                 existing_run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).first()
                 
+                # Normalize provider name
+                provider_name = state.original_input.get("provider", "unknown")
+                if provider_name == "unknown" and hasattr(state, 'metadata') and state.metadata:
+                    provider_name = state.metadata.get("provider_name", "unknown")
+
                 if existing_run:
                     # Update existing run
                     existing_run.status = _enum_value(state.status)
                     existing_run.current_step = _enum_value(state.current_step)
-                    existing_run.updated_at = state.updated_at
+                    existing_run.updated_at = datetime.utcnow()
                     existing_run.expires_at = state.expires_at
                     existing_run.capabilities = _serialize_json(state.capabilities)
                     existing_run.suggested_payload = _serialize_json(state.suggested_payload)
@@ -438,7 +443,7 @@ class DatabaseStateStore(HITLStateStore):
                         run_id=run_uuid or uuid.uuid4(),
                         status=_enum_value(state.status),
                         current_step=_enum_value(state.current_step),
-                        provider_name=state.original_input.get("provider", "unknown"),
+                        provider_name=provider_name,
                         session_id=state.original_input.get("session_id"),
                         user_id=state.original_input.get("user_id"),
                         original_input=_serialize_json(state.original_input),
@@ -467,6 +472,7 @@ class DatabaseStateStore(HITLStateStore):
                 
                 # Save step events
                 for event in state.step_history:
+                    # Use run_uuid consistently
                     existing_event = session.query(HITLStepEvent).filter(
                         HITLStepEvent.run_id == run_uuid,
                         HITLStepEvent.step == _enum_value(event.step),
@@ -485,7 +491,14 @@ class DatabaseStateStore(HITLStateStore):
                         )
                         session.add(new_event)
                 
-                session.commit()
+                try:
+                    session.commit()
+                except Exception as commit_error:
+                    session.rollback()
+                    # If unique violation happened despite our check, it's a race.
+                    # We could retry or just log it if we're using session.merge
+                    # For now, let's just raise it to see if it still happens
+                    raise commit_error
             except Exception as e:
                 session.rollback()
                 raise e
