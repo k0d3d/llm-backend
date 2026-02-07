@@ -2,6 +2,7 @@
 import os
 import asyncio
 import logging
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from rq import get_current_job
 from dotenv import load_dotenv
