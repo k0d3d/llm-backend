@@ -1,9 +1,9 @@
 """Worker tasks for RQ"""
+
 import os
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List
-from datetime import datetime
+from typing import Optional
 from rq import get_current_job
 from dotenv import load_dotenv
 
@@ -12,31 +12,37 @@ load_dotenv()
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
 from llm_backend.core.hitl.types import HITLConfig, HITLStatus
-from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
+from llm_backend.core.hitl.shared_bridge import (
+    get_shared_state_manager,
+    get_shared_websocket_bridge,
+)
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
 
+# Get shared components
+state_manager = get_shared_state_manager()
+websocket_bridge = get_shared_websocket_bridge()
+
 logger = logging.getLogger(__name__)
+
 
 def run_async(coro):
     """Helper to run async function in sync context"""
-    loop = None
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        should_close = True
-    else:
-        should_close = False
 
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        if should_close and loop:
-            loop.close()
+    return loop.run_until_complete(coro)
 
-def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, provider_name: str, run_id: Optional[str] = None):
+
+def process_hitl_orchestrator(
+    run_input_dict: dict,
+    hitl_config_dict: dict,
+    provider_name: str,
+    run_id: Optional[str] = None,
+):
     """
     Process HITL orchestrator execution
     Args:
@@ -47,26 +53,32 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
     Returns:
         Final result
     """
-    # Get shared components (init inside task for fork safety)
-    state_manager = get_shared_state_manager()
-    websocket_bridge = get_shared_websocket_bridge()
-
     job = get_current_job()
-    job.meta['status'] = 'processing'
+    job.meta["status"] = "processing"
     job.save_meta()
 
-    logger.info("Starting HITL orchestrator for session: %s (run_id: %s)", 
-                run_input_dict.get('session_id'), run_id)
+    logger.info(
+        "Starting HITL orchestrator for session: %s (run_id: %s)",
+        run_input_dict.get("session_id"),
+        run_id,
+    )
 
     # Log received data for debugging
     logger.debug("run_input_dict keys: %s", list(run_input_dict.keys()))
-    if 'agent_tool_config' in run_input_dict and logger.isEnabledFor(logging.DEBUG):
-        tool_config_data = run_input_dict['agent_tool_config']
-        logger.debug("agent_tool_config keys: %s", list(tool_config_data.keys()) if tool_config_data else None)
+    if "agent_tool_config" in run_input_dict and logger.isEnabledFor(logging.DEBUG):
+        tool_config_data = run_input_dict["agent_tool_config"]
+        logger.debug(
+            "agent_tool_config keys: %s",
+            list(tool_config_data.keys()) if tool_config_data else None,
+        )
         if tool_config_data:
             for key, val in tool_config_data.items():
-                if isinstance(val, dict) and 'data' in val:
-                    logger.debug("%s['data'] has example_input: %s", key, bool(val['data'].get('example_input')))
+                if isinstance(val, dict) and "data" in val:
+                    logger.debug(
+                        "%s['data'] has example_input: %s",
+                        key,
+                        bool(val["data"].get("example_input")),
+                    )
 
     # Reconstruct objects
     run_input = RunInput(**run_input_dict)
@@ -76,7 +88,10 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
     tool_config = {}
     if run_input.agent_tool_config:
         from llm_backend.core.types.common import AgentTools
-        replicate_tool_config = run_input.agent_tool_config.get(AgentTools.REPLICATETOOL)
+
+        replicate_tool_config = run_input.agent_tool_config.get(
+            AgentTools.REPLICATETOOL
+        )
         if not replicate_tool_config:
             # Try alternative key formats
             for key in run_input.agent_tool_config.keys():
@@ -88,8 +103,12 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
             # Handle both flat and nested data formats
             # Format 1 (flat): {'name': 'flux-1.1-pro', 'example_input': {...}}
             # Format 2 (nested): {'data': {'name': 'nano-banana', 'example_input': {...}}, 'name': 'replicate-agent-tool'}
-            if 'data' in replicate_tool_config and isinstance(replicate_tool_config.get('data'), dict) and replicate_tool_config['data']:
-                tool_config = replicate_tool_config['data']
+            if (
+                "data" in replicate_tool_config
+                and isinstance(replicate_tool_config.get("data"), dict)
+                and replicate_tool_config["data"]
+            ):
+                tool_config = replicate_tool_config["data"]
                 logger.debug("Extracted config from nested 'data' key")
             else:
                 tool_config = replicate_tool_config
@@ -97,8 +116,8 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
 
     logger.debug(
         "Extracted tool_config: name=%s, has_example_input=%s",
-        tool_config.get('name', 'MISSING'),
-        bool(tool_config.get('example_input'))
+        tool_config.get("name", "MISSING"),
+        bool(tool_config.get("example_input")),
     )
 
     # Create provider with proper config
@@ -111,12 +130,12 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
         config=hitl_config,
         run_input=run_input,
         state_manager=state_manager,
-        websocket_bridge=websocket_bridge
+        websocket_bridge=websocket_bridge,
     )
 
     # Use provided run_id or fallback to run_input_dict
-    target_run_id = run_id or run_input_dict.get('run_id')
-    
+    target_run_id = run_id or run_input_dict.get("run_id")
+
     if target_run_id:
         state = run_async(state_manager.load_state(target_run_id))
         if state:
@@ -130,15 +149,16 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
 
     logger.info("Orchestrator completed with status: %s", orchestrator.state.status)
 
-    job.meta['status'] = 'completed'
-    job.meta['run_id'] = orchestrator.state.run_id
+    job.meta["status"] = "completed"
+    job.meta["run_id"] = orchestrator.state.run_id
     job.save_meta()
 
     return {
         "run_id": orchestrator.state.run_id,
         "status": orchestrator.state.status,
-        "result": result
+        "result": result,
     }
+
 
 def process_hitl_resume(run_id: str, approval_response: dict):
     """
@@ -149,12 +169,8 @@ def process_hitl_resume(run_id: str, approval_response: dict):
     Returns:
         Resume result
     """
-    # Get shared components (init inside task for fork safety)
-    state_manager = get_shared_state_manager()
-    websocket_bridge = get_shared_websocket_bridge()
-
     job = get_current_job()
-    job.meta['status'] = 'processing'
+    job.meta["status"] = "processing"
     job.save_meta()
 
     logger.info("Resuming HITL run: %s", run_id)
@@ -177,25 +193,23 @@ def process_hitl_resume(run_id: str, approval_response: dict):
         config=state.config,
         run_input=state.original_input,
         state_manager=state_manager,
-        websocket_bridge=websocket_bridge
+        websocket_bridge=websocket_bridge,
     )
 
     # Load state with human edits
     orchestrator.state = state
     orchestrator.run_id = state.run_id
-    logger.debug("Loaded state with human_edits: %s", getattr(state, 'human_edits', 'MISSING'))
+    logger.debug(
+        "Loaded state with human_edits: %s", getattr(state, "human_edits", "MISSING")
+    )
 
     # Continue execution
     result = run_async(orchestrator.execute())
 
     logger.info("Resume completed with status: %s", orchestrator.state.status)
 
-    job.meta['status'] = 'completed'
-    job.meta['run_id'] = run_id
+    job.meta["status"] = "completed"
+    job.meta["run_id"] = run_id
     job.save_meta()
 
-    return {
-        "run_id": run_id,
-        "status": orchestrator.state.status,
-        "result": result
-    }
+    return {"run_id": run_id, "status": orchestrator.state.status, "result": result}

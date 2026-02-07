@@ -12,21 +12,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/tohju")
 WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "wss://ws.tohju.com")
 WEBSOCKET_API_KEY = os.getenv("WEBSOCKET_API_KEY")
 
-# Global instances for lazy loading
-_shared_state_manager = None
-_shared_websocket_bridge = None
+# Create shared state manager and websocket bridge
+shared_state_manager = create_state_manager(DATABASE_URL)
+shared_websocket_bridge = WebSocketHITLBridge(
+    WEBSOCKET_URL, WEBSOCKET_API_KEY, shared_state_manager
+)
+
 
 def get_shared_state_manager():
-    """Get or create the shared state manager instance (lazy)"""
-    global _shared_state_manager
-    if _shared_state_manager is None:
-        _shared_state_manager = create_state_manager(DATABASE_URL)
-    return _shared_state_manager
+    """Get the shared state manager instance"""
+    return shared_state_manager
+
 
 def get_shared_websocket_bridge():
-    """Get or create the shared websocket bridge instance (lazy)"""
-    global _shared_websocket_bridge
-    if _shared_websocket_bridge is None:
-        state_mgr = get_shared_state_manager()
-        _shared_websocket_bridge = WebSocketHITLBridge(WEBSOCKET_URL, WEBSOCKET_API_KEY, state_mgr)
-    return _shared_websocket_bridge
+    """Get the shared websocket bridge instance"""
+    return shared_websocket_bridge
