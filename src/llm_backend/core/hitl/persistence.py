@@ -468,7 +468,7 @@ class DatabaseStateStore(HITLStateStore):
                         # Store complete state as JSONB document
                         state_snapshot=_serialize_json(state.model_dump())
                     )
-                    session.add(new_run)
+                    session.merge(new_run)
                 
                 # Save step events
                 for event in state.step_history:
@@ -489,15 +489,13 @@ class DatabaseStateStore(HITLStateStore):
                             message=event.message,
                             event_metadata=_serialize_json(event.metadata)
                         )
-                        session.add(new_event)
+                        session.merge(new_event)
                 
                 try:
                     session.commit()
                 except Exception as commit_error:
                     session.rollback()
-                    # If unique violation happened despite our check, it's a race.
-                    # We could retry or just log it if we're using session.merge
-                    # For now, let's just raise it to see if it still happens
+                    # If we still get an error, it's a real issue
                     raise commit_error
             except Exception as e:
                 session.rollback()

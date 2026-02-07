@@ -20,6 +20,7 @@ class PayloadBuilder:
         return Agent(
             "openai:gpt-4o-mini",
             result_type=CandidatePayload,
+            retries=3,
             system_prompt="""
             You are a strict API Payload Constructor.
             Your goal is to map a User's Request (Natural Language + Attachments) into a JSON object that matches a specific Schema.
@@ -33,10 +34,16 @@ class PayloadBuilder:
                - For 'Config' fields (sliders, numbers), use the schema's default unless the user explicitly asks to change it (e.g., "set width to 512").
                - For 'Content' fields (prompts, images), you MUST get the value from the User Request. Do not use defaults for content.
             
-            OUTPUT:
-            Return a JSON object with:
-            - "input": The constructed payload.
-            - "reasoning": Brief explanation of why you mapped certain fields.
+            CRITICAL OUTPUT REQUIREMENT:
+            You MUST return a JSON object with EXACTLY these keys:
+            - "input": A dictionary containing the constructed payload fields. THIS IS MANDATORY.
+            - "reasoning": A string explaining your decisions.
+            
+            Example:
+            {
+                "input": {"prompt": "a dog", "width": 512},
+                "reasoning": "Mapped user prompt to 'prompt' and used default width."
+            }
             """
         )
 
