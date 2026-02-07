@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Start the FastAPI server
-poetry run fastapi run src/main.py --port $PORT --workers 2 &
+fastapi run src/main.py --port $PORT --workers 2 &
 api_pid=$!
 echo "FastAPI server started with PID: $api_pid"
 
