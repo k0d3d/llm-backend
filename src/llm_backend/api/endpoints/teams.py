@@ -7,7 +7,11 @@ from rq import Queue
 from llm_backend.agents.replicate_team import ReplicateTeam
 from llm_backend.core.types.common import AgentTools, RunInput
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
+from llm_backend.core.hitl.v3.orchestrator import HITLOrchestratorV3
 from llm_backend.core.hitl.types import HITLConfig
+
+# Toggle for V3 Orchestrator
+USE_V3 = True
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.workers.connection import get_redis_connection
 from llm_backend.workers.tasks import process_hitl_orchestrator
@@ -120,9 +124,11 @@ async def run_replicate_team(
 
         # Check for active run and resume if exists
         orchestrator = None
+        OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestr
+        
         if run_session_id and state_manager:
             print(f"🔍 Checking for active HITL run for session {run_session_id}")
-            orchestrator = await HITLOrchestrator.resume(
+            orchestrator = await OrchestratorClass.resume(
                 session_id=run_session_id,
                 provider=provider,
                 state_manager=state_manager,
@@ -136,7 +142,7 @@ async def run_replicate_team(
         else:
             # Create new orchestrator
             print(f"🆕 Creating new HITL run for session {run_session_id}")
-            orchestrator = HITLOrchestrator(
+            orchestrator = OrchestratorClass(
                 provider=provider,
                 config=hitl_config,
                 run_input=run_input,
@@ -222,7 +228,8 @@ async def run_replicate_team_hitl(
     provider = ProviderRegistry.get_provider("replicate")
     print(f"🔧 Provider retrieved: {type(provider).__name__}")
     
-    orchestrator = HITLOrchestrator(
+    OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestrator
+    orchestrator = OrchestratorClass(
         provider=provider,
         config=config,
         run_input=run_input,

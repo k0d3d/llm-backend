@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 import logging
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
+from llm_backend.core.hitl.v3.orchestrator import HITLOrchestratorV3
 from llm_backend.core.hitl.types import HITLConfig
+
+# Toggle for V3 Orchestrator
+USE_V3 = True
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.core.types.common import RunInput
 from llm_backend.providers.database_provider import DatabaseProvider
@@ -132,7 +136,8 @@ async def run_database_operation(
         hitl_config = HITLConfig(**(request.hitl_config or {}))
 
         # Initialize HITL orchestrator
-        orchestrator = HITLOrchestrator(
+        OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestr
+        orchestrator = OrchestratorClass(
             provider=provider,
             config=hitl_config,
             run_input=run_input,

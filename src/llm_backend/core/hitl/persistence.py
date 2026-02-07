@@ -404,99 +404,71 @@ class DatabaseStateStore(HITLStateStore):
         def _save():
             session = self.SessionLocal()
             try:
-                # Check if run exists
                 run_uuid = _uuid_value(state.run_id)
-                existing_run = session.query(HITLRun).filter(HITLRun.run_id == run_uuid).first()
-                
-                # Normalize provider name
                 provider_name = state.original_input.get("provider", "unknown")
                 if provider_name == "unknown" and hasattr(state, 'metadata') and state.metadata:
                     provider_name = state.metadata.get("provider_name", "unknown")
 
-                if existing_run:
-                    # Update existing run
-                    existing_run.status = _enum_value(state.status)
-                    existing_run.current_step = _enum_value(state.current_step)
-                    existing_run.updated_at = datetime.utcnow()
-                    existing_run.expires_at = state.expires_at
-                    existing_run.capabilities = _serialize_json(state.capabilities)
-                    existing_run.suggested_payload = _serialize_json(state.suggested_payload)
-                    existing_run.validation_issues = _serialize_json(state.validation_issues)
-                    existing_run.raw_response = _serialize_json(state.raw_response)
-                    existing_run.processed_response = state.processed_response
-                    existing_run.final_result = _serialize_json(state.final_result)
-                    existing_run.session_id = state.original_input.get("session_id")
-                    existing_run.user_id = state.original_input.get("user_id")
-                    existing_run.pending_actions = _serialize_json(state.pending_actions)
-                    existing_run.approval_token = state.approval_token
-                    existing_run.checkpoint_context = _serialize_json(state.checkpoint_context)
-                    existing_run.last_approval = _serialize_json(state.last_approval)
-                    existing_run.human_edits = _serialize_json(state.human_edits)
-                    existing_run.total_execution_time_ms = state.total_execution_time_ms
-                    existing_run.human_review_time_ms = state.human_review_time_ms
-                    existing_run.provider_execution_time_ms = state.provider_execution_time_ms
-                    # Store complete state as JSONB document
-                    existing_run.state_snapshot = _serialize_json(state.model_dump())
-                else:
-                    # Create new run
-                    new_run = HITLRun(
-                        run_id=run_uuid or uuid.uuid4(),
-                        status=_enum_value(state.status),
-                        current_step=_enum_value(state.current_step),
-                        provider_name=provider_name,
-                        session_id=state.original_input.get("session_id"),
-                        user_id=state.original_input.get("user_id"),
-                        original_input=_serialize_json(state.original_input),
-                        hitl_config=_serialize_json(state.config),
-                        created_at=state.created_at,
-                        updated_at=state.updated_at,
-                        expires_at=state.expires_at,
-                        capabilities=_serialize_json(state.capabilities),
-                        suggested_payload=_serialize_json(state.suggested_payload),
-                        validation_issues=_serialize_json(state.validation_issues),
-                        raw_response=_serialize_json(state.raw_response),
-                        processed_response=_serialize_json(state.processed_response),
-                        final_result=_serialize_json(state.final_result),
-                        pending_actions=_serialize_json(state.pending_actions),
-                        approval_token=state.approval_token,
-                        checkpoint_context=_serialize_json(state.checkpoint_context),
-                        last_approval=_serialize_json(state.last_approval),
-                        human_edits=_serialize_json(state.human_edits),
-                        total_execution_time_ms=state.total_execution_time_ms,
-                        human_review_time_ms=state.human_review_time_ms,
-                        provider_execution_time_ms=state.provider_execution_time_ms,
-                        # Store complete state as JSONB document
-                        state_snapshot=_serialize_json(state.model_dump())
-                    )
-                    session.merge(new_run)
+                # Use merge directly for true idempotency
+                # We construct a transient object and let SQLAlchemy handle the upsert
+                run_data = {
+                    "run_id": run_uuid,
+                    "status": _enum_value(state.status),
+                    "current_step": _enum_value(state.current_step),
+                    "provider_name": provider_name,
+                    "session_id": state.original_input.get("session_id"),
+                    "user_id": state.original_input.get("user_id"),
+                    "original_input": _serialize_json(state.original_input),
+                    "hitl_config": _serialize_json(state.config),
+                    "updated_at": datetime.utcnow(),
+                    "expires_at": state.expires_at,
+                    "capabilities": _serialize_json(state.capabilities),
+                    "suggested_payload": _serialize_json(state.suggested_payload),
+                    "validation_issues": _serialize_json(state.validation_issues),
+                    "raw_response": _serialize_json(state.raw_response),
+                    "processed_response": state.processed_response,
+                    "final_result": _serialize_json(state.final_result),
+                    "pending_actions": _serialize_json(state.pending_actions),
+                    "approval_token": state.approval_token,
+                    "checkpoint_context": _serialize_json(state.checkpoint_context),
+                    "last_approval": _serialize_json(state.last_approval),
+                    "human_edits": _serialize_json(state.human_edits),
+                    "total_execution_time_ms": state.total_execution_time_ms,
+                    "human_review_time_ms": state.human_review_time_ms,
+                    "provider_execution_time_ms": state.provider_execution_time_ms,
+                    "state_snapshot": _serialize_json(state.model_dump())
+                }
+
+                # We can't easily merge without fetching first if we want to preserve created_at
+                # But we can use an explicit UPDATE if it exists, or INSERT if not.
+                # merge() is designed for this.
+                run_obj = HITLRun(**run_data)
+                session.merge(run_obj)
                 
                 # Save step events
                 for event in state.step_history:
-                    # Use run_uuid consistently
-                    existing_event = session.query(HITLStepEvent).filter(
+                    event_data = {
+                        "run_id": run_uuid,
+                        "step": _enum_value(event.step),
+                        "status": _enum_value(event.status),
+                        "timestamp": event.timestamp,
+                        "actor": event.actor,
+                        "message": event.message,
+                        "event_metadata": _serialize_json(event.metadata)
+                    }
+                    event_obj = HITLStepEvent(**event_data)
+                    
+                    # For events, we check existence to avoid duplicates
+                    exists = session.query(HITLStepEvent).filter(
                         HITLStepEvent.run_id == run_uuid,
-                        HITLStepEvent.step == _enum_value(event.step),
-                        HITLStepEvent.timestamp == event.timestamp
+                        HITLStepEvent.step == event_data["step"],
+                        HITLStepEvent.timestamp == event_data["timestamp"]
                     ).first()
                     
-                    if not existing_event:
-                        new_event = HITLStepEvent(
-                            run_id=run_uuid,
-                            step=_enum_value(event.step),
-                            status=_enum_value(event.status),
-                            timestamp=event.timestamp,
-                            actor=event.actor,
-                            message=event.message,
-                            event_metadata=_serialize_json(event.metadata)
-                        )
-                        session.merge(new_event)
+                    if not exists:
+                        session.add(event_obj)
                 
-                try:
-                    session.commit()
-                except Exception as commit_error:
-                    session.rollback()
-                    # If we still get an error, it's a real issue
-                    raise commit_error
+                session.commit()
             except Exception as e:
                 session.rollback()
                 raise e

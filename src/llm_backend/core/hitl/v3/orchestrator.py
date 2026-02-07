@@ -55,6 +55,11 @@ class HITLOrchestratorV3:
         self.user_id = getattr(run_input, "user_id", None)
         self.tenant = getattr(run_input, "tenant", "tohju")
 
+        # Link provider to run context
+        self.provider.set_run_input(self.run_input)
+        if hasattr(self.provider, 'set_orchestrator'):
+            self.provider.set_orchestrator(self)
+
         # Initialize State
         self.state = HITLState(
             run_id=self.run_id,
