@@ -1,13 +1,49 @@
 from typing import Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from pydantic_ai import Agent
 from .schema_extractor import ModelSchema
 from .context_assembler import RequestContext
 import json
 
 class CandidatePayload(BaseModel):
-    payload: Dict[str, Any]
-    reasoning: str
+    parameters: Dict[str, Any] = Field(..., description="The constructed API parameters")
+    reasoning: str = Field(..., description="Explanation of the construction logic")
+
+    @model_validator(mode='before')
+    @classmethod
+    def handle_hallucinations(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # 1. Map common variations back to 'parameters'
+            for alt in ['payload', 'input', 'data', 'fields', 'constructed_payload']:
+                if alt in data and 'parameters' not in data:
+                    data['parameters'] = data.pop(alt)
+            
+            # 2. If 'parameters' is still missing, check for root-level fields
+            if 'parameters' not in data:
+                # Assume anything that isn't 'reasoning' is a parameter
+                reasoning = data.get('reasoning', "No reasoning provided.")
+                params = {k: v for k, v in data.items() if k != 'reasoning'}
+                data = {'parameters': params, 'reasoning': reasoning}
+            
+            # 3. INTERNAL ALIAS MAPPING: Fix field names inside parameters
+            # Map common LLM hallucinations back to standard schema names
+            params = data.get('parameters', {})
+            if isinstance(params, dict):
+                field_aliases = {
+                    "image_input": ["image", "input_image", "source_image", "image_url"],
+                    "prompt": ["input", "text", "instruction", "query"],
+                    "audio_file": ["audio", "driven_audio", "voice"]
+                }
+                
+                # Check for each known alias group
+                for canonical, alts in field_aliases.items():
+                    # If canonical is missing, but an alias exists, rename it
+                    if canonical not in params:
+                        for alt in alts:
+                            if alt in params:
+                                params[canonical] = params.pop(alt)
+                                break
+        return data
 
 class PayloadBuilder:
     """
@@ -22,28 +58,22 @@ class PayloadBuilder:
             result_type=CandidatePayload,
             retries=3,
             system_prompt="""
-            You are a strict API Payload Constructor.
+            You are a strict API Parameter Constructor.
             Your goal is to map a User's Request (Natural Language + Attachments) into a JSON object that matches a specific Schema.
             
             RULES:
-            1. **Schema Adherence**: The user provides a Schema Definition (field names, types, descriptions). You must ONLY use fields defined in the schema.
-            2. **Zero Hallucination**: If the user has not specified a value for a field, and the schema has no default, leave it null/None. Do NOT invent values.
-            3. **Attachment Mapping**: If the schema expects an image/audio/video, and the context contains an attachment URL, map it to the most likely field.
-            4. **Explicit Edits**: If the context contains 'explicit_edits', those values are AUTHORITATIVE. Use them exactly.
+            1. **Schema Adherence**: Use ONLY fields defined in the schema.
+            2. **Zero Hallucination**: If a value is not in the User Request and has no default, leave it null.
+            3. **Attachment Mapping**: Map media URLs to appropriate fields (e.g. image_input, audio_file).
+            4. **Explicit Edits**: Values in 'explicit_edits' are AUTHORITATIVE. Use them exactly.
             5. **Config vs Content**: 
-               - For 'Config' fields (sliders, numbers), use the schema's default unless the user explicitly asks to change it (e.g., "set width to 512").
-               - For 'Content' fields (prompts, images), you MUST get the value from the User Request. Do not use defaults for content.
+               - Config (numbers/toggles): Use schema defaults unless the user requests changes.
+               - Content (prompts/images): MUST come from the User Request. NEVER use demo values.
             
-            CRITICAL OUTPUT REQUIREMENT:
-            You MUST return a JSON object with EXACTLY these keys:
-            - "payload": A dictionary containing the constructed payload fields. THIS IS MANDATORY.
-            - "reasoning": A string explaining your decisions.
-            
-            Example:
-            {
-                "payload": {"prompt": "a dog", "width": 512},
-                "reasoning": "Mapped user prompt to 'prompt' and used default width."
-            }
+            OUTPUT REQUIREMENT:
+            Return a JSON object with:
+            - "parameters": The dictionary of API fields.
+            - "reasoning": Your explanation.
             """
         )
 
@@ -52,7 +82,6 @@ class PayloadBuilder:
         agent = PayloadBuilder.create_agent()
         
         # Prepare the input for the agent
-        # We convert schema to a simplified dict representation for the prompt
         schema_desc = {
             "fields": {
                 name: {
@@ -67,14 +96,17 @@ class PayloadBuilder:
         }
         
         prompt = f"""
+        TASK: Construct the 'parameters' for the API call based on the schema below.
+        
         SCHEMA DEFINITION:
         {json.dumps(schema_desc, indent=2)}
         
         USER REQUEST CONTEXT:
         {context.get_llm_view()}
         
-        Construct the payload now.
+        Construct the response now.
         """
         
         result = await agent.run(prompt)
+        print(f"🤖 Raw LLM Response: {result.data.model_dump_json()}")
         return result.data

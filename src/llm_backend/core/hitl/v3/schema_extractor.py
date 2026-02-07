@@ -39,13 +39,25 @@ class SchemaExtractor:
         fields = {}
         required_fields = []
 
+        # Heuristic for editing models
+        is_editing = any(word in description.lower() for word in ["edit", "style", "paint", "convert", "modify", "transform"])
+
         for key, value in example_input.items():
             field_type = cls._infer_type(value)
             is_content = cls._is_content_field(key, value)
             
-            # Heuristic: Content fields are usually required unless they are lists (which can be empty)
-            # But let's be safe: if it's content, we mark it as "candidate for requirement"
-            is_required = is_content and not isinstance(value, list)
+            # Smarter requirement heuristic:
+            # 1. Content fields are candidate for requirement
+            # 2. Lists are required ONLY if it's an editing model (where image_input=[] is a failure)
+            # 3. Specifically optional fields are excluded
+            is_required = is_content
+            
+            if isinstance(value, list) and not is_editing:
+                is_required = False
+            
+            # Negative signals for requirement
+            if any(k in key.lower() for k in ["negative", "optional", "mask", "face"]):
+                is_required = False
 
             # Determine default value
             # CRITICAL: For CONTENT fields, we explicit force None/Empty to avoid leakage

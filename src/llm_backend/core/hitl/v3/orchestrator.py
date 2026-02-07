@@ -171,30 +171,35 @@ class HITLOrchestratorV3:
             tool_config = self._get_replicate_config()
             schema = SchemaExtractor.extract(tool_config)
             print(f"📦 Blueprint: Extracted {len(schema.fields)} fields from schema")
+            for f_name, f_def in schema.fields.items():
+                print(f"   - {f_name}: type={f_def.type.value}, required={f_def.is_required}, content={f_def.is_content}")
 
             # 2. BUNDLE: Assemble Context (Prompt + History + Attachments)
             self._transition_to_step(HITLStep.INFORMATION_REVIEW)
             # Ensure history is loaded
-            if not getattr(self.run_input, "conversation", None) and self.session_id:
+            if self.run_input and not getattr(self.run_input, "conversation", None) and self.session_id:
+                print(f"📡 Fetching chat history for session {self.session_id}")
                 self.run_input.conversation = await self.chat_history_client.get_session_history(self.session_id)
             
             context = ContextAssembler.build(self.run_input, self.state.human_edits)
             print(f"🔗 Bundle: Assembled context with {len(context.attachments)} attachments")
+            # print(f"🔍 Context View: {context.get_llm_view()}")
 
             # 3. FABRICATION: Build Candidate Payload
             self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
             candidate = await PayloadBuilder.build(context, schema)
-            self.state.suggested_payload = candidate.payload
-            print(f"🛠️ Fabrication: Candidate payload created. Reasoning: {candidate.reasoning[:100]}...")
+            self.state.suggested_payload = candidate.parameters
+            print(f"🛠️ Fabrication: Candidate parameters: {candidate.parameters}")
+            print(f"🛠️ Fabrication: Reasoning: {candidate.reasoning[:200]}...")
 
             # 4. GUARD: Validate Payload
-            issues = Validator.validate(candidate.payload, schema)
+            issues = Validator.validate(candidate.parameters, schema)
             self.state.validation_issues = [i.model_dump() for i in issues]
             
             # Check for blocking errors
             blocking_issues = [i for i in issues if i.severity == "error"]
             if blocking_issues:
-                print(f"⚠️ Guard: Found {len(blocking_issues)} blocking issues. Pausing for HITL.")
+                print(f"⚠️ Guard: Found {len(blocking_issues)} blocking issues: {[i.field for i in blocking_issues]}")
                 self.state.status = HITLStatus.AWAITING_HUMAN
                 return await self._pause_for_information(blocking_issues)
 
@@ -207,11 +212,12 @@ class HITLOrchestratorV3:
             
             replicate_payload = ReplicatePayload(
                 provider_name="replicate",
-                input=candidate.payload,
+                input=candidate.parameters,
                 operation_type=self._infer_operation_type(),
                 model_version=self.latest_version
             )
             
+            print(f"🚀 Calling provider {self.provider_name} with parameters: {candidate.parameters}")
             response = self.provider.execute(replicate_payload)
             
             self.state.raw_response = response.raw_response
@@ -232,6 +238,8 @@ class HITLOrchestratorV3:
 
         except Exception as e:
             print(f"❌ V3 Orchestrator Failed: {e}")
+            import traceback
+            traceback.print_exc()
             self._add_step_event(self.state.current_step, HITLStatus.FAILED, "system", str(e))
             self.state.status = HITLStatus.FAILED
             if self.state_manager:

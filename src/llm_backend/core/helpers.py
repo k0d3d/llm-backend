@@ -48,17 +48,20 @@ async def send_data_to_url_async(data: dict | str, url: str, crew_input: RunInpu
     """
     Async variant of send_data_to_url using httpx.AsyncClient to avoid blocking the event loop.
     """
+    if crew_input is None:
+        print(f"⚠️ send_data_to_url_async: crew_input is None, skipping request to {url}")
+        return None
 
     payload_data = {
-        "sessionId": crew_input.session_id,
+        "sessionId": getattr(crew_input, 'session_id', None),
         "content": data,
-        "destination": crew_input.user_email,
-        "userId": crew_input.user_id,
-        "sender": crew_input.agent_email,
+        "destination": getattr(crew_input, 'user_email', None),
+        "userId": getattr(crew_input, 'user_id', None),
+        "sender": getattr(crew_input, 'agent_email', None),
         "messageType": message_type,
-        "logId": crew_input.log_id,
-        "prompt": crew_input.prompt,
-        "tenant": crew_input.tenant,
+        "logId": getattr(crew_input, 'log_id', None),
+        "prompt": getattr(crew_input, 'prompt', None),
+        "tenant": getattr(crew_input, 'tenant', 'tohju'),
         "operationType": data.get("operation_type", "") if isinstance(data, dict) else "text",
     }
 

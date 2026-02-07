@@ -45,6 +45,18 @@ class ContextAssembler:
         )
         
         prompt = ri_dict.get("prompt", "")
+        
+        # Clean HITL prefixes from prompt (e.g. "prompt: Paint me a red photo" -> "Paint me a red photo")
+        # This prevents the LLM from getting confused by the field name being part of the value.
+        clean_prompt = prompt
+        if ":" in prompt[:20]: # Only look at the start
+            parts = prompt.split(":", 1)
+            # If the part before colon matches a common field name, strip it
+            prefix = parts[0].strip().lower()
+            if prefix in ["prompt", "input", "text", "instruction", "image", "audio"]:
+                clean_prompt = parts[1].strip()
+                print(f"🧹 ContextAssembler: Stripped prefix '{prefix}:' from prompt")
+
         conversation = ri_dict.get("conversation", []) or []
         user_id = ri_dict.get("user_id")
         
@@ -63,7 +75,7 @@ class ContextAssembler:
                 attachments.append(url)
         
         return RequestContext(
-            user_prompt=prompt,
+            user_prompt=clean_prompt,
             conversation_history=conversation,
             attachments=attachments,
             user_id=user_id,
