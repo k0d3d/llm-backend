@@ -39,6 +39,8 @@ class HITLOrchestratorV3:
         websocket_bridge: Optional[WebSocketHITLBridge] = None
     ):
         self.provider = provider
+        self.provider_name = getattr(provider, "model_name", "unknown")
+        self.latest_version = getattr(provider, "latest_version", "")
         self.config = config
         self.run_input = run_input
         self.run_id = str(uuid.uuid4())
@@ -60,8 +62,34 @@ class HITLOrchestratorV3:
             original_input=run_input.model_dump() if hasattr(run_input, "model_dump") else dict(run_input)
         )
         
+        # Ensure provider_name is in original_input for persistence fallback
+        if isinstance(self.state.original_input, dict):
+            self.state.original_input["provider"] = self.provider_name
+        
         if config.timeout_seconds > 0:
             self.state.expires_at = datetime.utcnow() + timedelta(seconds=config.timeout_seconds)
+
+        self._add_step_event(HITLStep.CREATED, HITLStatus.QUEUED, "system", "Run created")
+
+    def _add_step_event(self, step: HITLStep, status: HITLStatus, actor: str, message: Optional[str] = None, metadata: Optional[Dict] = None):
+        """Add a step event to the history"""
+        from ..types import StepEvent
+        event = StepEvent(
+            step=step,
+            status=status,
+            actor=actor,
+            message=message,
+            metadata=metadata or {}
+        )
+        self.state.step_history.append(event)
+        self.state.updated_at = datetime.utcnow()
+        print(f"📍 Step Event: {step.value} - {status.value} ({actor}): {message}")
+
+    def _transition_to_step(self, step: HITLStep, status: HITLStatus = HITLStatus.RUNNING, message: Optional[str] = None):
+        """Transition to a new step"""
+        self.state.current_step = step
+        self.state.status = status
+        self._add_step_event(step, status, "system", message or f"Transitioned to {step.value}")
 
     async def start_run(self, original_input: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None) -> str:
         """Start the HITL run and persist initial state to database"""
@@ -134,11 +162,13 @@ class HITLOrchestratorV3:
         
         try:
             # 1. BLUEPRINT: Extract Schema (Stripped of demo values)
+            self._transition_to_step(HITLStep.FORM_INITIALIZATION)
             tool_config = self._get_replicate_config()
             schema = SchemaExtractor.extract(tool_config)
             print(f"📦 Blueprint: Extracted {len(schema.fields)} fields from schema")
 
             # 2. BUNDLE: Assemble Context (Prompt + History + Attachments)
+            self._transition_to_step(HITLStep.INFORMATION_REVIEW)
             # Ensure history is loaded
             if not getattr(self.run_input, "conversation", None) and self.session_id:
                 self.run_input.conversation = await self.chat_history_client.get_session_history(self.session_id)
@@ -147,7 +177,7 @@ class HITLOrchestratorV3:
             print(f"🔗 Bundle: Assembled context with {len(context.attachments)} attachments")
 
             # 3. FABRICATION: Build Candidate Payload
-            self.state.current_step = HITLStep.PAYLOAD_REVIEW
+            self._transition_to_step(HITLStep.PAYLOAD_REVIEW)
             candidate = await PayloadBuilder.build(context, schema)
             self.state.suggested_payload = candidate.input
             print(f"🛠️ Fabrication: Candidate payload created. Reasoning: {candidate.reasoning[:100]}...")
@@ -160,23 +190,30 @@ class HITLOrchestratorV3:
             blocking_issues = [i for i in issues if i.severity == "error"]
             if blocking_issues:
                 print(f"⚠️ Guard: Found {len(blocking_issues)} blocking issues. Pausing for HITL.")
+                self.state.status = HITLStatus.AWAITING_HUMAN
                 return await self._pause_for_information(blocking_issues)
 
             # 5. EXECUTION: Call Provider
-            self.state.current_step = HITLStep.API_CALL
-            self.state.status = HITLStatus.RUNNING
+            self._transition_to_step(HITLStep.API_CALL)
             
             # Update provider with the fabricated payload
-            # Note: Provider.execute expects an AgentPayload or dict depending on implementation
-            # We pass the 'input' part which is what Replicate expects
-            response = self.provider.execute(candidate.input)
+            # Wrap the raw dictionary from fabrication into a ReplicatePayload object
+            from llm_backend.providers.replicate_provider import ReplicatePayload
+            
+            replicate_payload = ReplicatePayload(
+                provider_name="replicate",
+                input=candidate.input,
+                operation_type=self._infer_operation_type(),
+                model_version=self.latest_version
+            )
+            
+            response = self.provider.execute(replicate_payload)
             
             self.state.raw_response = response.raw_response
             self.state.processed_response = response.processed_response
             
             # 6. COMPLETION
-            self.state.current_step = HITLStep.COMPLETED
-            self.state.status = HITLStatus.COMPLETED
+            self._transition_to_step(HITLStep.COMPLETED, HITLStatus.COMPLETED)
             self.state.final_result = self.provider.audit_response(response)
             
             if self.state_manager and self.session_id:
@@ -190,6 +227,7 @@ class HITLOrchestratorV3:
 
         except Exception as e:
             print(f"❌ V3 Orchestrator Failed: {e}")
+            self._add_step_event(self.state.current_step, HITLStatus.FAILED, "system", str(e))
             self.state.status = HITLStatus.FAILED
             if self.state_manager:
                 await self.state_manager.save_state(self.state)
@@ -235,3 +273,17 @@ class HITLOrchestratorV3:
             # Fallback to provider's internal config if available
             return getattr(self.provider, "config", {})
         return config.get("data") if "data" in config else config
+
+    def _infer_operation_type(self) -> Any:
+        """Infers the operation type from description"""
+        from ..types import OperationType
+        description = (getattr(self.provider, "description", "") or "").lower()
+        
+        if any(word in description for word in ["image", "picture", "photo"]):
+            return OperationType.IMAGE_GENERATION
+        elif any(word in description for word in ["video", "movie", "animation"]):
+            return OperationType.VIDEO_GENERATION
+        elif any(word in description for word in ["audio", "sound", "music"]):
+            return OperationType.AUDIO_GENERATION
+        
+        return OperationType.TEXT_GENERATION
