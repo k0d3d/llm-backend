@@ -11,12 +11,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
+from llm_backend.core.hitl.v3.orchestrator import HITLOrchestratorV3
 from llm_backend.core.hitl.types import HITLConfig, HITLStatus
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
 
 logger = logging.getLogger(__name__)
+
+# Toggle for V3 Orchestrator
+USE_V3 = True
 
 def run_async(coro):
     """Helper to run async function in sync context"""
@@ -106,7 +110,9 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
     logger.debug("Provider created with config keys: %s", list(provider.config.keys()))
 
     # Create orchestrator
-    orchestrator = HITLOrchestrator(
+    OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestrator
+    
+    orchestrator = OrchestratorClass(
         provider=provider,
         config=hitl_config,
         run_input=run_input,
@@ -159,20 +165,19 @@ def process_hitl_resume(run_id: str, approval_response: dict):
 
     logger.info("Resuming HITL run: %s", run_id)
 
-    # Load state
-    state = run_async(state_manager.load_state(run_id))
+    # Resume the run and get updated state
+    state = run_async(state_manager.resume_run(run_id, approval_response))
 
     if not state:
-        raise ValueError(f"Run {run_id} not found")
-
-    # Resume the run
-    run_async(state_manager.resume_run(run_id, approval_response))
+        raise ValueError(f"Run {run_id} not found or failed to resume")
 
     # Get provider and recreate orchestrator
     provider_name = state.original_input.get("provider", "replicate")
     provider = ProviderRegistry.get_provider(provider_name)
 
-    orchestrator = HITLOrchestrator(
+    OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestrator
+    
+    orchestrator = OrchestratorClass(
         provider=provider,
         config=state.config,
         run_input=state.original_input,

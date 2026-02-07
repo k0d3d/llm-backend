@@ -10,12 +10,16 @@ from rq import Queue
 import logging
 
 from llm_backend.core.hitl.orchestrator import HITLOrchestrator
+from llm_backend.core.hitl.v3.orchestrator import HITLOrchestratorV3
 from llm_backend.core.hitl.types import HITLConfig, HITLStatus
 from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_shared_websocket_bridge
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
 from llm_backend.workers.connection import get_redis_connection
 from llm_backend.workers.tasks import process_hitl_orchestrator, process_hitl_resume
+
+# Toggle for V3 Orchestrator
+USE_V3 = True
 
 router = APIRouter(prefix="/hitl", tags=["HITL"])
 
@@ -139,7 +143,8 @@ async def start_hitl_run(
         provider = ProviderRegistry.get_provider(provider_name)
         
         # Initialize orchestrator
-        orchestrator = HITLOrchestrator(
+        OrchestratorClass = HITLOrchestratorV3 if USE_V3 else HITLOrchestrator
+        orchestrator = OrchestratorClass(
             provider=provider,
             config=hitl_config,
             run_input=request.run_input,
