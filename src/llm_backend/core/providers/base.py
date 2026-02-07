@@ -5,7 +5,7 @@ Base provider interface and data models for HITL system
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from types import SimpleNamespace
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from enum import Enum
 from datetime import datetime
 import time
