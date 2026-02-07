@@ -491,10 +491,22 @@ class ReplicateProvider(AIProvider):
 
         # Use actual user attachment as primary, fallback to first if none found
         primary_attachment = (actual_user_attachments[0] if actual_user_attachments
-                            else (normalized_attachments[0] if normalized_attachments else None))
+                            else None)
         print(f"🎯 Primary attachment selected: {primary_attachment}")
 
         example_input_data = deepcopy(self.example_input) if isinstance(self.example_input, dict) else {}
+
+        # Strip example URLs from example_input_data to avoid leaking them into payload
+        if isinstance(example_input_data, dict):
+            for field, value in list(example_input_data.items()):
+                if isinstance(value, str) and value in example_urls:
+                    example_input_data[field] = None
+                    print(f"🧹 Stripped example URL from field '{field}'")
+                elif isinstance(value, list):
+                    filtered_list = [v for v in value if v not in example_urls]
+                    if filtered_list != value:
+                        example_input_data[field] = filtered_list
+                        print(f"🧹 Stripped example URLs from list field '{field}'")
 
         if primary_attachment:
             print(f"🔧 Attempting to assign primary_attachment to example_input_data...")
@@ -591,9 +603,9 @@ class ReplicateProvider(AIProvider):
                         example_urls.add(value)
 
             # Resolve attachment conflicts using AI agent
-            if normalized_attachments:
+            if actual_user_attachments:
                 agent_input_payload = await self._resolve_attachment_conflicts(
-                    normalized_attachments, agent_input_payload, clean_prompt, list(example_urls)
+                    actual_user_attachments, agent_input_payload, clean_prompt, list(example_urls)
                 )
 
             # Final safety net: ensure attachment is added if still missing
@@ -741,9 +753,42 @@ class ReplicateProvider(AIProvider):
     def validate_payload(self, payload: ReplicatePayload, prompt: str, attachments: List[str]) -> List[ValidationIssue]:
         """
         Simplified validation that trusts form field classification.
-        Only checks for empty values in fields that exist in the payload.
+        Also verifies attachment counts.
         """
         issues = []
+
+        # Count expected vs actual images in payload
+        # Extract example URLs to filter them out
+        example_urls = set()
+        if isinstance(self.example_input, dict):
+            for value in self.example_input.values():
+                if isinstance(value, str) and value.startswith("http"):
+                    example_urls.add(value)
+                elif isinstance(value, list):
+                    for v in value:
+                        if isinstance(v, str) and v.startswith("http"):
+                            example_urls.add(v)
+
+        image_fields = ["input_image", "image", "image_input", "source_image", "image_url"]
+        payload_attachments = []
+        for field in image_fields:
+            val = payload.input.get(field)
+            if isinstance(val, list):
+                payload_attachments.extend([v for v in val if isinstance(v, str) and v.startswith("http") and v not in example_urls])
+            elif isinstance(val, str) and val.startswith("http") and val not in example_urls:
+                payload_attachments.append(val)
+        
+        # Deduplicate
+        payload_attachments = list(dict.fromkeys(payload_attachments))
+        
+        if len(payload_attachments) != len(attachments):
+            issues.append(ValidationIssue(
+                field="attachments",
+                issue=f"Attachment count mismatch: payload has {len(payload_attachments)}, but request has {len(attachments)}",
+                severity="warning",
+                suggested_fix=f"Ensure all {len(attachments)} attachments are mapped to appropriate fields",
+                auto_fixable=False
+            ))
 
         # Check for empty values in fields that are present in the payload
         # (Form classifier already determined which fields are required)
