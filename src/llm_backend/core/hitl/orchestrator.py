@@ -218,7 +218,7 @@ class HITLOrchestrator:
         
         if not human_edits:
             # print(f"🔍 No human edits found anywhere. state.human_edits: {getattr(self.state, 'human_edits', 'MISSING')}, last_approval: {getattr(self.state, 'last_approval', 'MISSING')}")
-            return None
+            return {}
         
         print(f"🔍 Collected human edits: {human_edits}")
         return human_edits
@@ -2103,13 +2103,14 @@ class HITLOrchestrator:
         self.state.status = status
         self.state.updated_at = datetime.utcnow()
     
-    def _add_step_event(self, step: HITLStep, status: HITLStatus, actor: str, message: str):
+    def _add_step_event(self, step: HITLStep, status: HITLStatus, actor: str, message: str, metadata: Optional[Dict[str, Any]] = None):
         event = StepEvent(
             step=step,
             status=status,
             timestamp=datetime.utcnow(),
             actor=actor,
-            message=message
+            message=message,
+            metadata=metadata or {}
         )
         self.state.step_history.append(event)
         print(f"📝 Added step event: {step.value} -> {status.value} ({actor}: {message})")

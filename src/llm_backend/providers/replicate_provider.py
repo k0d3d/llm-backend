@@ -634,11 +634,20 @@ class ReplicateProvider(AIProvider):
 
             # Start with example input and set initial prompt
             fallback_input = deepcopy(example_input_data)
-            prompt_targets = ["prompt", "text", "input", "instruction", "query"]
-            for target in prompt_targets:
-                if target in fallback_input:
-                    fallback_input[target] = clean_prompt
-                    break
+            
+            # Use structured form values as authority if available
+            if structured_form_values:
+                print(f"🔧 Fallback: Using {len(structured_form_values)} structured form values")
+                # Map structured values to fallback input
+                mapped_structured = self._map_form_fields_to_api_fields(structured_form_values)
+                fallback_input.update(mapped_structured)
+            else:
+                # Traditional fallback for prompt
+                prompt_targets = ["prompt", "text", "input", "instruction", "query"]
+                for target in prompt_targets:
+                    if target in fallback_input:
+                        fallback_input[target] = clean_prompt
+                        break
 
             # Apply HITL edits after setting initial values
             if hitl_edits:

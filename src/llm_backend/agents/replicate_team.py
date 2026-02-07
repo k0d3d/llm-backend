@@ -351,17 +351,19 @@ class ReplicateTeam:
                 - Prioritize: current prompt > conversation history > example_input defaults
 
                 **NEW: Structured Form Values Support**
-                - If structured_form_values are provided, these are authoritative user-provided values from a form
-                - You MUST intelligently map structured_form_values field names to the correct example_input field names
+                - If structured_form_values are provided, these are authoritative user-provided values from a form.
+                - You MUST use these values to populate the Replicate API payload.
+                - You MUST intelligently map structured_form_values field names to the correct example_input field names.
                 - Common mappings:
                   * "prompt" → "input" (for text input fields)
                   * "image_input" → "file_input" (for image file fields)
                   * "image" → "input_image" or "image_url" or "file_input"
-                - Use schema_metadata to understand the actual API field names
+                - Use schema_metadata to understand the actual API field names.
                 - When structured_form_values["prompt"] exists, find the correct text input field in example_input
-                  (could be "input", "prompt", "text", "instruction", etc.) and use that value
+                  (could be "input", "prompt", "text", "instruction", etc.) and use that value.
                 - When structured_form_values contains arrays (like image_input=[]), map to the correct array field
-                  in example_input (could be "file_input", "images", "input_images", etc.)
+                  in example_input (could be "file_input", "images", "input_images", etc.).
+                - **CRITICAL**: Your 'input' dictionary in the response MUST NOT be empty if any inputs (prompt, files, or structured_form_values) are provided.
 
                 Respond strictly with the AgentPayload schema containing the transformed input.
                 """
