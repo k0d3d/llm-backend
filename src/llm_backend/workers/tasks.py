@@ -16,21 +16,25 @@ from llm_backend.core.hitl.shared_bridge import get_shared_state_manager, get_sh
 from llm_backend.core.providers.registry import ProviderRegistry
 from llm_backend.core.types.common import RunInput
 
-# Get shared components
-state_manager = get_shared_state_manager()
-websocket_bridge = get_shared_websocket_bridge()
-
 logger = logging.getLogger(__name__)
 
 def run_async(coro):
     """Helper to run async function in sync context"""
+    loop = None
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        should_close = True
+    else:
+        should_close = False
 
-    return loop.run_until_complete(coro)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        if should_close and loop:
+            loop.close()
 
 def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, provider_name: str, run_id: Optional[str] = None):
     """
@@ -43,6 +47,10 @@ def process_hitl_orchestrator(run_input_dict: dict, hitl_config_dict: dict, prov
     Returns:
         Final result
     """
+    # Get shared components (init inside task for fork safety)
+    state_manager = get_shared_state_manager()
+    websocket_bridge = get_shared_websocket_bridge()
+
     job = get_current_job()
     job.meta['status'] = 'processing'
     job.save_meta()
@@ -141,6 +149,10 @@ def process_hitl_resume(run_id: str, approval_response: dict):
     Returns:
         Resume result
     """
+    # Get shared components (init inside task for fork safety)
+    state_manager = get_shared_state_manager()
+    websocket_bridge = get_shared_websocket_bridge()
+
     job = get_current_job()
     job.meta['status'] = 'processing'
     job.save_meta()
