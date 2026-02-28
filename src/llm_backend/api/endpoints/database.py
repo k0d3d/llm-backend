@@ -36,7 +36,9 @@ class DatabaseRunRequest(BaseModel):
     """Request for database operation"""
     prompt: str = Field(description="Natural language database request")
     session_id: str = Field(description="Session identifier")
-    user_id: str = Field(description="User identifier")
+    user_id: Optional[str] = Field(None, description="User identifier")
+    user_email: Optional[str] = Field(None, description="User email for identity resolution")
+    tenant: str = Field("tohju", description="Tenant for identity resolution")
     agent_tool_config: Dict[str, Any] = Field(
         description="Tool configuration with current_schema"
     )
