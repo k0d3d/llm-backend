@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from llm_backend.api.api import api_router
 from llm_backend.core.config import settings
+from llm_backend.core.security import SecurityMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,9 @@ app = FastAPI(
     openapi_url=f"{settings.API_PREFIX}/openapi.json",
     # lifespan=lifespan,
 )
+
+# Add Security Middleware first to block malicious IPs early
+app.add_middleware(SecurityMiddleware)
 
 
 if settings.BACKEND_CORS_ORIGINS:
