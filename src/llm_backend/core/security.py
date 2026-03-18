@@ -25,11 +25,15 @@ SUSPICIOUS_PATTERNS = [
     r"q=node&destination=node",
     r"wlwmanifest\.xml",
     r"PROPFIND",
+    r"robots\.txt",
 ]
 
 SUSPICIOUS_EXTENSIONS = [
     ".php", ".asp", ".aspx", ".jsp", ".cgi", ".sh", ".sql"
 ]
+
+# Internal networks or IPs that should never be blocked
+WHITELISTED_IPS = ["127.0.0.1", "::1"]
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 BLOCK_LIST_KEY = "blocked_ips"
@@ -42,9 +46,15 @@ class IPBlocker:
         self.redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
     def is_blocked(self, ip: str) -> bool:
+        if ip in WHITELISTED_IPS:
+            return False
         return self.redis.sismember(BLOCK_LIST_KEY, ip)
 
     def block_ip(self, ip: str, reason: str):
+        if ip in WHITELISTED_IPS:
+            logger.info(f"Skipping block for whitelisted IP: {ip} Reason: {reason}")
+            return
+
         if not self.redis.sismember(BLOCK_LIST_KEY, ip):
             logger.warning(f"Blocking IP: {ip} Reason: {reason}")
             self.redis.sadd(BLOCK_LIST_KEY, ip)
@@ -67,15 +77,26 @@ class IPBlocker:
 
 class SecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        client_host = request.headers.get("x-forwarded-for")
-        if client_host:
-            client_host = client_host.split(",")[0].strip()
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            client_host = forwarded_for.split(",")[0].strip()
         else:
             client_host = request.client.host
 
+        # WHITELIST LOGIC:
+        # 1. Check for Cloudflare Worker specific headers (like X-Tenant-ID) 
+        #    which indicates it's coming from our trusted core-api or llm-invoker.
+        # 2. Check for internal gateway IP (172.x.x.x) which is often the proxy.
+        
+        is_internal = (
+            request.headers.get("x-tenant-id") is not None or
+            request.headers.get("authorization") is not None or
+            client_host.startswith("172.") # Docker internal network
+        )
+
         blocker = IPBlocker()
 
-        if blocker.is_blocked(client_host):
+        if not is_internal and blocker.is_blocked(client_host):
             return Response(
                 content="Access Denied",
                 status_code=status.HTTP_403_FORBIDDEN
@@ -84,6 +105,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         query = request.url.query
         method = request.method
+
+        # Skip inspection for trusted internal requests to prevent accidental blocking
+        if is_internal:
+            return await call_next(request)
 
         if method == "PROPFIND":
             blocker.block_ip(client_host, f"Suspicious method: {method}")
