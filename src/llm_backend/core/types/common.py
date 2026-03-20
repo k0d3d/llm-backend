@@ -16,6 +16,9 @@ class RunInput(BaseModel):
     agent_tool_config: Optional[dict] = None
     selected_llm: Optional[dict] = None
     conversation: Optional[List[Dict[str, Any]]] = None
+    chat_history: Optional[List[Dict[str, Any]]] = None
+    document_context: Optional[str] = ""
+    document_url: Optional[str] = None
 
 
 class OperationType(str, Enum):
